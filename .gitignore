@@ -1,0 +1,39 @@
+# ===== 敏感配置（绝不推送）=====
+.env
+.env.*
+!.env.example
+
+# ===== 生信大文件兜底（防止数据被误加入）=====
+*.fastq
+*.fastq.gz
+*.fq
+*.fq.gz
+*.bam
+*.bam.bai
+*.sam
+*.sam.gz
+*.cram
+*.vcf
+*.vcf.gz
+*.vcf.gz.tbi
+*.g.vcf
+*.g.vcf.gz
+*.sif
+*.tar
+*.tar.gz
+*.tar.bz2
+*.7z
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# ===== 运行产物 =====
+logs/
+*.log
+
+# ===== 系统/编辑器 =====
+.DS_Store
