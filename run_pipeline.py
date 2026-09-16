@@ -132,8 +132,12 @@ class BatchCtx:
         dry-run 零落盘不检查"""
         if self.runner.dry_run:
             return
-        free_gb = shutil.disk_usage(
-            self.work if os.path.isdir(self.work) else config.RESULTS_ROOT).free / 1e9
+        p = self.work if os.path.isdir(self.work) else config.RESULTS_ROOT
+        if not os.path.isdir(p):   # 沿祖先取存在路径（与开跑前检查同策略，
+            p = os.path.dirname(os.path.abspath(p))   # 新机器首轮 results/ 未建也不崩）
+            while p and not os.path.isdir(p):
+                p = os.path.dirname(p)
+        free_gb = shutil.disk_usage(p or "/").free / 1e9
         if free_gb < config.DISK_MIN_FREE_GB:
             raise RuntimeError(
                 f"运行中磁盘复查 P0（{after_step} 后）：剩余 {free_gb:.0f}GB < "
