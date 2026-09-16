@@ -204,16 +204,14 @@ class BatchCtx:
         for lv, msg in pre_anoms:
             (self.log.error if lv == "P0" else self.log.warn)(f"[开跑前-{lv}] {msg}")
 
-        # md5 完整性校验（并行）；失败样本终止分析并进入通知
+        # md5 完整性校验：失败=输入数据损坏，属"严重影响分析"——P0 整批阻断
+        # （v2.9.0 DEC-21，原为剔除该样本继续；anom 随启动通知可见）
         md5_failed = set()
         if not self.args.dry_run:
             md5_failed, _ = scanner.verify_md5(self.batch_dir, self.log, workers=self.plan.workers)
-            for sm in md5_failed & set(valid):
-                self.log.error(f"md5 校验失败，样本 {sm} 终止分析")
-                invalid[sm] = "md5 校验失败"
-        for sm in md5_failed:
-            valid.pop(sm, None)
-        self.bdata["samples"]["valid"] = sorted(valid)
+            for sm in sorted(md5_failed & set(valid)):
+                self.log.error(f"md5 校验失败，样本 {sm} 输入数据损坏")
+                pre_anoms.append(("P0", f"{sm} md5 校验失败（输入数据损坏）"))
 
         # 启动通知（样本数/输入体量/资源计划 + 开跑前检查结论）
         if self.notify_on:
@@ -228,16 +226,25 @@ class BatchCtx:
                     f"sort -m {p.sort_mem}｜GATK -Xmx {p.gatk_mem}｜cohort {p.cohort_mem}"
                     f"｜单样本峰值 {p.peak_per_sample_gb} GB")
             for lv, msg in pre_anoms:
-                body += f"\n\n异常: [{lv}] {msg}" + (" ← 需确认" if lv == "P1" else " ← 阻断级")
+                body += f"\n\n异常: [{lv}] {msg}" + {"P0": " ← 阻断级（中断分析）", "P1": " ← 需确认"}.get(lv, " ← 提示")
             if not pre_anoms:
                 body += "\n\n异常: 无"
             body += f"\n\n产物: {self.work}"
             dingtalk.notify(f"[GWAS][{lvl}] {self.batch}批次 · 启动", body, logger=self.log)
+        # P0=阻断级（严重影响分析→直接中断批次，DEC-21）：依赖/样本名/磁盘/md5
+        p0_reasons = []
         if missing_deps:
-            raise RuntimeError(f"开跑前检查 P0：依赖文件缺失 → {'; '.join(missing_deps)}")
+            p0_reasons.append(f"依赖文件缺失 → {'; '.join(missing_deps)}")
         if bad_names:
-            raise RuntimeError(f"开跑前检查 P0：样本名非常规字符（注入面，中断分析）→ "
-                               f"{'; '.join(sorted(bad_names))}")
+            p0_reasons.append(f"样本名非常规字符（注入面）→ {'; '.join(sorted(bad_names))}")
+        if free_gb < config.DISK_MIN_FREE_GB:
+            p0_reasons.append(f"磁盘剩余 {free_gb:.0f}GB < {config.DISK_MIN_FREE_GB}GB"
+                              f"（{n_initial} 样本估算约需 {need_gb}GB）")
+        if md5_failed:
+            p0_reasons.append(f"md5 校验失败（输入损坏）→ {'; '.join(sorted(md5_failed))}")
+        if p0_reasons:
+            raise RuntimeError("开跑前检查 P0（严重影响分析，中断批次）："
+                               + "；".join(p0_reasons))
 
         self.merged, merge_failed = scanner.merge_all(
             valid, os.path.join(self.work, "fastq_merged"), self.runner,
@@ -260,8 +267,8 @@ class BatchCtx:
                      metrics=f"输入 {_fmt_gb(input_bytes)} | md5 "
                              f"{'FAIL ' + str(len(md5_failed)) if md5_failed else 'OK'}"
                              f" | 无效样本 {len(invalid)}",
-                     anomalies=[("P0", f"{sm} md5 校验失败（终止分析）") for sm in sorted(md5_failed)]
-                               + [("P0", f"{sm} {rs}") for sm, rs in merge_failed.items()],
+                     anomalies=[("P1", f"{sm} {rs}（样本终止，其余照常）")
+                                for sm, rs in merge_failed.items()],
                      artifacts=f"fastq_merged/*_R*.fastq.gz "
                                + alerts.artifact_summary(os.path.join(self.work, "fastq_merged", "*_R*.fastq.gz")),
                      log_hint=f"tail -f {self.work}/logs/sample_<样本>.self.log")
@@ -371,8 +378,9 @@ class BatchCtx:
             fs = msam.parse_flagstat(fl)
             slog.result(f"mapped {fs.get('mapped_pct')}% properly_paired "
                         f"{fs.get('pp_pct')}% singletons {fs.get('sgl_pct')}%")
-            qc_ok = msam.qc_judgement(fs, slog)
-            return sm, qc_ok, fs
+            # 质量口径仅记录（v2.9.0：<90 报 P1 通知，不再判样本失败，DEC-21）
+            msam.qc_judgement(fs, slog)
+            return sm, True, fs
 
         res = _parallel({sm: (lambda sm=sm: s2(sm)) for sm in self.merged
                          if sm not in self.failed}, self.plan.workers)
@@ -382,8 +390,6 @@ class BatchCtx:
                 if isinstance(fs, dict):
                     self.metrics.setdefault("mapped_pct", {})[sm] = fs.get("mapped_pct")
                     self.metrics.setdefault("pp_pct", {})[sm] = fs.get("pp_pct")
-                if not ok:
-                    self.failed[sm] = "step2: 比对质检未达标"
             else:
                 self.failed[sm] = f"step2 异常: {r}"
                 self.log.error(f"{sm} Step 2 异常\n{r[1] if isinstance(r, tuple) else ''}")
@@ -395,7 +401,11 @@ class BatchCtx:
                              f"proper pair {_avg(self.metrics.get('pp_pct'))}%",
                      anomalies=_step_anoms(self, "step2")
                                + alerts.check_flagstat(self.metrics.get("mapped_pct"),
-                                                       self.metrics.get("pp_pct")),
+                                                       self.metrics.get("pp_pct"))
+                               + [("P1", f"{sm} mapped {v}% < {config.MAPPED_MIN_PCT}%"
+                                         f"（QC 口径，报错不中断）")
+                                  for sm, v in sorted((self.metrics.get("mapped_pct") or {}).items())
+                                  if v is not None and v < config.MAPPED_MIN_PCT],
                      artifacts=f"bam/*/*.sort.bam "
                                + alerts.artifact_summary(os.path.join(self.work, "bam", "*", "*.sort.bam")),
                      log_hint=f"tail -f {self.work}/logs/sample_<样本>.self.log")
@@ -1066,7 +1076,7 @@ def write_delivery_index(delivered_dirs):
 
 def _step_anoms(ctx, step_prefix):
     """本步失败样本 → P0 异常行"""
-    return [(f"P0", f"{sm} 执行失败：{reason.split(':', 1)[-1].strip()}")
+    return [(f"P1", f"{sm} 执行失败：{reason.split(':', 1)[-1].strip()}")
             for sm, reason in ctx.failed.items() if reason.startswith(step_prefix)]
 
 
@@ -1085,7 +1095,7 @@ def _notify_result(batch, bdata, plan, log):
     m = bdata.get("metrics", {})
     final_anoms = []
     if bdata.get("failed_samples"):
-        final_anoms += [("P0", f"{len(bdata['failed_samples'])} 个样本失败: "
+        final_anoms += [("P1", f"{len(bdata['failed_samples'])} 个样本失败: "
                           + ", ".join(list(bdata['failed_samples'])[:5]))]
     lvl = alerts.worst_level(final_anoms) if final_anoms else \
         ("OK" if bdata['status'] == 'success' else "P1")
@@ -1106,7 +1116,7 @@ def _notify_result(batch, bdata, plan, log):
         f"Ti/Tv {m.get('titv_raw')}→{m.get('titv_pass')}")
     if final_anoms:
         for lv, msg in final_anoms:
-            text += f"\n\n异常: [{lv}] {msg}" + (" ← 需确认" if lv == "P1" else " ← 阻断/污染级")
+            text += f"\n\n异常: [{lv}] {msg}" + {"P0": " ← 阻断级（中断分析）", "P1": " ← 需确认"}.get(lv, " ← 提示")
     else:
         text += "\n\n异常: 无"
     delivery = (bdata.get("artifacts") or {}).get("delivery_dir")

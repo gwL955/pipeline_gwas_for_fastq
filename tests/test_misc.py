@@ -32,7 +32,8 @@ def _dep_env(td):
         open(os.path.join(ref, n), "wb").write(b"x")
     for v in config.SIF.values():
         open(os.path.join(sif, os.path.basename(v)), "wb").write(b"x")
-    return {"GWAS_REFERENCE_DIR": ref, "GWAS_SIF_DIR": sif}
+    return {"GWAS_REFERENCE_DIR": ref, "GWAS_SIF_DIR": sif,
+            "GWAS_DISK_MIN_FREE_GB": "0"}   # 磁盘 P0 现为阻断级（v2.9.0），测试环境豁免
 
 
 class TestLoggerTee(unittest.TestCase):

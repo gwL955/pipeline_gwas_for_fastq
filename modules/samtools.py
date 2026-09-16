@@ -103,13 +103,13 @@ def flagstat_identical(path_a, path_b):
 
 
 def qc_judgement(flagstat, logger):
-    """质检口径：mapped>90%；singletons 应很低；properly paired ≈97-98%
-    （偏低且伴跨染色体配对升高 → 节段重复区正常现象，记录告警不报错）"""
-    ok = True
+    """质检口径（v2.9.0 起仅记录不判失败——质量问题报错不中断，DEC-21）：
+    mapped>90%；singletons 应很低；properly paired ≈97-98%
+    （偏低且伴跨染色体配对升高 → 节段重复区正常现象，记录告警不报错）。
+    mapped<90 由流程侧升级为 P1 通知"""
     mp = flagstat.get("mapped_pct")
     if mp is not None and mp < 90.0:
-        logger.error(f"mapped {mp}% < 90%，比对率不达标")
-        ok = False
+        logger.warn(f"mapped {mp}% < 90%（QC 口径，P1 通知，不中断）")
     elif mp is not None:
         logger.result(f"mapped {mp}% ≥ 90%")
     sp = flagstat.get("sgl_pct")
@@ -122,4 +122,3 @@ def qc_judgement(flagstat, logger):
         if dc and flagstat.get("paired") and dc / flagstat["paired"] > 0.03:
             msg += "；伴跨染色体配对升高 → 节段重复区正常现象（MAPQ=0 为主），告警不报错"
         logger.warn(msg)
-    return ok

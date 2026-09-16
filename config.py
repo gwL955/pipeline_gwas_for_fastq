@@ -9,7 +9,7 @@ from pathlib import Path
 
 # ── 流程版本（与 design_doc/DESIGN.md design-meta version 同步，
 #    check_design.py 校验两处一致；写进 run_summary 与交付 README） ──────
-PIPELINE_VERSION = "2.8.0"
+PIPELINE_VERSION = "2.9.0"
 
 # ── 工作区 ──────────────────────────────────────────────────────────────
 PIPELINE_DIR = Path(__file__).resolve().parent          # $WORK/pipeline
@@ -113,26 +113,28 @@ INDEL_HARD_FILTERS = [
 
 # ── QC 阈值 ─────────────────────────────────────────────────────────────
 FASTP_RETENTION_WARN = 95.0     # 保留率 %，低于告警
-MAPPED_MIN_PCT = 90.0           # 比对率下限
+MAPPED_MIN_PCT = 90.0           # 比对率 QC 口径下限（<90 → P1 报错不中断，v2.9.0）
 DUP_WARN_PCT = 30.0             # 重复率上限（>30 且 ELS 偏小 → 文库复杂度不足）
 MEAN_COV_MIN = 50.0             # MEAN/MED_TARGET_COVERAGE 下限
 PCT_20X_MIN = 90.0              # PCT_TARGET_BASES_20X 下限 %
 DP_MIN = int(os.environ.get("GWAS_DP_MIN", "20"))   # ./. 裁决深度阈值（可配）
 
-# ── 通知分级告警阈值（P0=阻断级/污染级，P1=需确认；环境变量可覆盖） ──────
+# ── 分级告警阈值（v2.9.0 三级体系 DEC-21：P0=阻断级·严重影响分析→中断批次；
+#    P1=严重·执行失败隔离/NTC 污染/mapped<90，报错不中断；P2=质量提示·只记录；
+#    环境变量可覆盖） ─────────────────────────────────────────────────────
 DISK_MIN_FREE_GB = float(os.environ.get("GWAS_DISK_MIN_FREE_GB", "200"))  # 开跑前剩余磁盘
 DISK_PER_SAMPLE_GB = float(os.environ.get("GWAS_DISK_PER_SAMPLE_GB", "75"))  # 每样本估算需求
-FASTP_RETENTION_P1 = 80.0       # Step1: 保留率 <80% → P1
-FASTP_Q30_P1 = 85.0             # Step1: Q30 <85% → P1
-MAPPED_NOTIFY_P1 = 95.0         # Step2: mapped <95% → P1（严于 QC 口径 90）
-PROPER_PAIR_P1 = 85.0           # Step2: properly paired <85% → P1
-DUP_P1 = 30.0                   # Step3: 重复率 >30% → P1
-ON_TARGET_P1 = 8.0              # Step6: on-target <8% → P1（小 panel 正常 ≈8-10%，见笔记 5-5）
-MEAN_DEPTH_P1 = 50.0            # Step6: mean depth <50× → P1
-PCT_20X_P1 = 95.0               # Step6: ≥20x 靶比例 <95% → P1
-TITV_P1 = 2.0                   # Step6: Ti/Tv <2.0 → P1（结论口径）
-CALL_RATE_P1 = 95.0             # Step6: call rate <95% → P1（非 ./. 基因型比例）
-NTC_DEPTH_P0 = 10.0             # Step6: NTC 靶区深度 >10× → P0（污染）
+FASTP_RETENTION_P1 = 80.0       # Step1: 保留率 <80% → P2
+FASTP_Q30_P1 = 85.0             # Step1: Q30 <85% → P2
+MAPPED_NOTIFY_P1 = 95.0         # Step2: mapped <95% → P2（严于 QC 口径 90→P1）
+PROPER_PAIR_P1 = 85.0           # Step2: properly paired <85% → P2
+DUP_P1 = 30.0                   # Step3: 重复率 >30% → P2
+ON_TARGET_P1 = 8.0              # Step6: on-target <8% → P2（小 panel 正常 ≈8-10%，见笔记 5-5）
+MEAN_DEPTH_P1 = 50.0            # Step6: mean depth <50× → P2
+PCT_20X_P1 = 95.0               # Step6: ≥20x 靶比例 <95% → P2
+TITV_P1 = 2.0                   # Step6: Ti/Tv <2.0 → P2（结论口径）
+CALL_RATE_P1 = 95.0             # Step6: call rate <95% → P2（非 ./. 基因型比例）
+NTC_DEPTH_P0 = 10.0             # Step6: NTC 靶区深度 >10× → P1（污染，报错不中断）
 
 # ── 钉钉机器人（地址等环境参数只来自 pipeline/.env 或进程环境变量，禁止硬编码） ──
 DINGTALK_WEBHOOK = os.environ.get("DINGTALK_WEBHOOK", "")   # 未配置 → 通知静默跳过

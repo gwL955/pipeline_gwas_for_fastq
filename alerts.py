@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""分级告警与步骤里程碑通知（P0/P1/OK）。
+"""分级告警与步骤里程碑通知（P0/P1/P2/OK，v2.9.0 三级体系 DEC-21）。
 
-P0：阻断级/污染级——执行失败、合并失败、依赖缺失、磁盘不足、NTC 污染
-P1：需确认——各步质量阈值越界、对账数量/新鲜度、命名规范
+P0：阻断级——严重影响分析的错误（输入损坏/环境不可用/注入面），直接中断批次
+P1：严重——执行失败（样本级隔离）/严重数据异常（NTC 污染、mapped<90 QC 口径），
+    报错但不中断批次
+P2：提示——质量阈值越界/口径存疑（保留率、Q30、dup、覆盖度、Ti/Tv、对账等），
+    只报错记录，不影响运行
 OK：全部正常，仅常规里程碑播报
 
 消息模板（钉钉 markdown 官方子集：标题/引用/加粗/列表）：
@@ -21,7 +24,7 @@ from datetime import datetime
 
 import config
 
-LEVEL_ORDER = {"P0": 0, "P1": 1, "OK": 2}
+LEVEL_ORDER = {"P0": 0, "P1": 1, "P2": 2, "OK": 3}
 
 
 def worst_level(anomalies):
@@ -58,12 +61,12 @@ def check_fastp(retention, q30):
     out = []
     sm, v = _min_item(retention)
     if v is not None and v < config.FASTP_RETENTION_P1:
-        out.append(("P1", f"{sm} fastp 保留率 {v}%（阈值 {config.FASTP_RETENTION_P1}%）"))
+        out.append(("P2", f"{sm} fastp 保留率 {v}%（阈值 {config.FASTP_RETENTION_P1}%）"))
     elif v is not None and v < config.FASTP_RETENTION_WARN:
         out.append(("OK", f"{sm} fastp 保留率 {v}%（<{config.FASTP_RETENTION_WARN}% 提示）"))
     sm, v = _min_item(q30)
     if v is not None and v < config.FASTP_Q30_P1:
-        out.append(("P1", f"{sm} Q30 {v}%（阈值 {config.FASTP_Q30_P1}%）"))
+        out.append(("P2", f"{sm} Q30 {v}%（阈值 {config.FASTP_Q30_P1}%）"))
     return out
 
 
@@ -71,17 +74,17 @@ def check_flagstat(mapped_pct, pp_pct):
     out = []
     sm, v = _min_item(mapped_pct)
     if v is not None and v < config.MAPPED_NOTIFY_P1:
-        out.append(("P1", f"{sm} mapped {v}%（阈值 {config.MAPPED_NOTIFY_P1}%）"))
+        out.append(("P2", f"{sm} mapped {v}%（阈值 {config.MAPPED_NOTIFY_P1}%）"))
     sm, v = _min_item(pp_pct)
     if v is not None and v < config.PROPER_PAIR_P1:
-        out.append(("P1", f"{sm} properly paired {v}%（阈值 {config.PROPER_PAIR_P1}%）"))
+        out.append(("P2", f"{sm} properly paired {v}%（阈值 {config.PROPER_PAIR_P1}%）"))
     return out
 
 
 def check_dup(dup_pct):
     sm, v = _max_item(dup_pct)
     if v is not None and v > config.DUP_P1:
-        return [("P1", f"{sm} 重复率 {v}%（阈值 {config.DUP_P1}%，建库复杂度告急）")]
+        return [("P2", f"{sm} 重复率 {v}%（阈值 {config.DUP_P1}%，建库复杂度告急）")]
     return []
 
 
@@ -89,28 +92,28 @@ def check_capture(mean_depth, pct20x, on_target):
     out = []
     sm, v = _min_item(mean_depth)
     if v is not None and v < config.MEAN_DEPTH_P1:
-        out.append(("P1", f"{sm} mean depth {v}×（阈值 {config.MEAN_DEPTH_P1}×）"))
+        out.append(("P2", f"{sm} mean depth {v}×（阈值 {config.MEAN_DEPTH_P1}×）"))
     sm, v = _min_item(pct20x)
     if v is not None and v < config.PCT_20X_P1:
-        out.append(("P1", f"{sm} ≥20x 靶比例 {v}%（阈值 {config.PCT_20X_P1}%）"))
+        out.append(("P2", f"{sm} ≥20x 靶比例 {v}%（阈值 {config.PCT_20X_P1}%）"))
     sm, v = _min_item(on_target)
     if v is not None and v < config.ON_TARGET_P1:
-        out.append(("P1", f"{sm} on-target {v}%（阈值 {config.ON_TARGET_P1}%）"))
+        out.append(("P2", f"{sm} on-target {v}%（阈值 {config.ON_TARGET_P1}%）"))
     return out
 
 
 def check_variantqc(titv_pass, call_rate):
     out = []
     if titv_pass is not None and titv_pass < config.TITV_P1:
-        out.append(("P1", f"Ti/Tv {titv_pass}（阈值 {config.TITV_P1}，结论口径存疑）"))
+        out.append(("P2", f"Ti/Tv {titv_pass}（阈值 {config.TITV_P1}，结论口径存疑）"))
     if call_rate is not None and call_rate < config.CALL_RATE_P1:
-        out.append(("P1", f"call rate {call_rate}%（阈值 {config.CALL_RATE_P1}%，非 ./. 基因型占比）"))
+        out.append(("P2", f"call rate {call_rate}%（阈值 {config.CALL_RATE_P1}%，非 ./. 基因型占比）"))
     return out
 
 
 def check_ntc(ntc_depth):
     if ntc_depth is not None and ntc_depth > config.NTC_DEPTH_P0:
-        return [("P0", f"NTC 靶区深度 {ntc_depth}×（阈值 {config.NTC_DEPTH_P0}×）——阴性对照出现真实覆盖，疑似污染")]
+        return [("P1", f"NTC 靶区深度 {ntc_depth}×（阈值 {config.NTC_DEPTH_P0}×）——阴性对照出现真实覆盖，疑似污染")]
     return []
 
 
@@ -142,7 +145,7 @@ def step_milestone(batch, step_no, step_name, *, samples="", metrics="",
             text += f"\n\n{line}"
     if anomalies:
         for lv, msg in anomalies:
-            tag = " ← 需确认" if lv == "P1" else (" ← 阻断/污染级" if lv == "P0" else "")
+            tag = {"P0": " ← 阻断级（中断分析）", "P1": " ← 需确认"}.get(lv, "")
             text += f"\n\n异常: [{lv}] {msg}{tag}"
     else:
         text += "\n\n异常: 无"

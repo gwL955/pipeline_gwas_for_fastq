@@ -140,8 +140,13 @@ def verify_md5(batch_dir, logger, workers=4):
                     n_ok += 1
                 else:
                     n_bad += 1
-                    failed_samples.add(os.path.basename(
-                        os.path.dirname(p)) or os.path.basename(p))
+                    # 样本名按布局推导（RUN-33 修复：平铺布局曾误取批次目录名，
+                    # 致 md5_failed 与 valid 无交集——失败样本从未被剔除）
+                    if os.path.normpath(os.path.dirname(p)) == os.path.normpath(batch_dir):
+                        m = ILLUMINA_RE.match(os.path.basename(p))
+                        failed_samples.add(m.group(1) if m else os.path.basename(p))
+                    else:
+                        failed_samples.add(os.path.basename(os.path.dirname(p)))
                     logger.error(f"md5 校验失败: {p} 期望 {md5} 实际 {actual} ({e_})")
     logger.result(f"md5 校验完成: OK={n_ok} FAIL={n_bad}")
     return failed_samples, len(entries)

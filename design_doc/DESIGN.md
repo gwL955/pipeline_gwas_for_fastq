@@ -3,7 +3,7 @@
 ```yaml
 # ---- design-meta（机器可解析锚点，勿手改格式；版本规则见 §0）----
 doc: GWAS-pipeline-design
-version: 2.8.0
+version: 2.9.0
 updated: 2026-09-16
 owner_human: gewenlong
 owner_machine: ZCode(GLM)
@@ -115,6 +115,7 @@ $WORK/
 | DEC-16 | 容器运行时在 Runner 初始化时自解析为**绝对路径**（shutil.which → 标准目录探测），且子进程 PATH 兜底补齐标准系统目录——不依赖调用方 PATH 完整性 | 实测：从 PATH 受限环境（PATH=/usr/bin:/bin，IDE 面板/精简 env 类）启动曾致 `singularity: not found` exit=127（RUN-22）；singularity 实装于 /usr/local/bin/singularity |
 | DEC-17 | **流程只在宿主 Python 运行**：main() 启动卫兵检测 /.singularity.d 或 SINGULARITY_* 环境变量，容器内运行立即退出并指引用 /usr/bin/python3；本机 `python` 是容器别名（mamba 解释器），嵌套容器既看不到宿主 singularity、时区还是 UTC | RUN-22/23：alias python 嵌套运行全部 127；流程纯标准库无需 mamba/conda |
 | DEC-19 | **样本名白名单 P0 阻断**：含 `[A-Za-z0-9_.-]` 外字符的样本名 → P0 异常项入启动通知后 **直接中断该批次分析**（RuntimeError，批次 failed；多批次运行其余批次照常隔离执行）；dry-run 同样触发（提前暴露）。v2.7.0 曾为"判无效跳过继续"，v2.8.0 按用户指示收紧为阻断 | 样本名进入 shell 命令拼接与 bwa @RG 头，非常规字符属注入面（RUN-31 H1→RUN-32 收紧） |
+| DEC-21 | **分级体系重构（三级）**：P0=阻断级——严重影响分析（样本名非法/依赖缺失/磁盘不足/md5 输入损坏）→ 统一 raise **中断批次**（退出码 1，多批次隔离不变）；P1=严重——执行失败（样本级隔离，不中断批次）、NTC 污染、mapped<90 QC 口径，报错不中断；P2=质量提示——原全部质量阈值（保留率/Q30/mapped<95/pp/dup/on-target/depth/20X/Ti/Tv/call rate）与对账数量/新鲜度，只记录。mapped<90 不再判样本失败（原会终止样本，属"质量问题中断"违例） | 用户 v2.9.0 决定：P0 应为严重影响分析的阻断级；质量只报错不中断；原 P0/P1 机械降级为 P1/P2（RUN-33） |
 | DEC-20 | **process_batch 步骤方法化**：Step 0-6 拆为 BatchCtx.step0_scan~step6_summary_delivery 七个方法，process_batch 仅编排（~40 行）；跨步骤状态挂 ctx（merged/excluded/cohort_stats/bdata 等）；MultiQC 时序锚随之锚定 step6 方法源码 | 原单函数 ~700 行难读难测；拆分后 95 用例全绿 + 真实批次 --step 0 冒烟验证（RUN-31，用户采纳 M3 建议） |
 | DEC-18 | **环境参数去硬编码，统一 .env**：钉钉 webhook（含 access_token）等环境参数只存 `pipeline/.env`（与代码同目录；模板 .env.example；`GWAS_ENV_FILE` 可改址），config.py 启动时解析并入（setdefault），三源优先级=进程环境变量 > .env > 内置默认；webhook 未配置→通知静默跳过（启动 WARN + 首次发送返回配置指引）；`singularity/` 镜像目录仍为 pipeline 同级目录约定，不走 .env | 用户要求（RUN-26）：密钥硬编码在代码里会随代码分发泄露且换环境必改源码；.env 权限 600 |
 
@@ -127,24 +128,24 @@ $WORK/
 | --- | --- | --- | --- |
 | TH-01 | FASTP_LENGTH_REQUIRED | 36 | fastp 最短读长（笔记） |
 | TH-02 | FASTP_RETENTION_WARN | 95.0 | 保留率<95% 提示 |
-| TH-03 | FASTP_RETENTION_P1 | 80.0 | 保留率<80% → P1 |
-| TH-04 | FASTP_Q30_P1 | 85.0 | Q30<85% → P1 |
-| TH-05 | MAPPED_MIN_PCT | 90.0 | mapped<90% ERROR（QC 口径） |
-| TH-06 | MAPPED_NOTIFY_P1 | 95.0 | mapped<95% → P1（通知从严） |
-| TH-07 | PROPER_PAIR_P1 | 85.0 | properly paired<85% → P1 |
+| TH-03 | FASTP_RETENTION_P1 | 80.0 | 保留率<80% → P2 |
+| TH-04 | FASTP_Q30_P1 | 85.0 | Q30<85% → P2 |
+| TH-05 | MAPPED_MIN_PCT | 90.0 | mapped<90% → P1 报错不中断（QC 口径，v2.9.0 前判样本失败） |
+| TH-06 | MAPPED_NOTIFY_P1 | 95.0 | mapped<95% → P2（通知从严） |
+| TH-07 | PROPER_PAIR_P1 | 85.0 | properly paired<85% → P2 |
 | TH-08 | DUP_WARN_PCT | 30.0 | dup>30% 且 ELS 小 → 复杂度告警 |
-| TH-09 | DUP_P1 | 30.0 | dup>30% → P1 |
+| TH-09 | DUP_P1 | 30.0 | dup>30% → P2 |
 | TH-10 | MEAN_COV_MIN | 50.0 | MEAN 靶深度<50× WARN |
-| TH-11 | MEAN_DEPTH_P1 | 50.0 | mean depth<50× → P1 |
+| TH-11 | MEAN_DEPTH_P1 | 50.0 | mean depth<50× → P2 |
 | TH-12 | PCT_20X_MIN | 90.0 | 20X<90% WARN |
-| TH-13 | PCT_20X_P1 | 95.0 | ≥20x 靶比例<95% → P1 |
-| TH-14 | ON_TARGET_P1 | 8.0 | on-target<8% → P1（小 panel 正常 8-10%，笔记 5-5；v2.0.0 由 60 修正） |
+| TH-13 | PCT_20X_P1 | 95.0 | ≥20x 靶比例<95% → P2 |
+| TH-14 | ON_TARGET_P1 | 8.0 | on-target<8% → P2（小 panel 正常 8-10%，笔记 5-5；v2.0.0 由 60 修正） |
 | TH-15 | DP_MIN | 20 | `./.` 裁决深度阈值 |
 | TH-16 | HC_INTERVAL_PADDING | 100 | HC 靶区外扩 bp（笔记） |
-| TH-21 | NTC_DEPTH_P0 | 10.0 | NTC 靶深>10× → P0 污染 |
-| TH-22 | TITV_P1 | 2.0 | Ti/Tv<2.0 → P1 |
-| TH-23 | CALL_RATE_P1 | 95.0 | call rate<95% → P1 |
-| TH-24 | DISK_MIN_FREE_GB | 200 | 开跑前剩余磁盘 P0 线 |
+| TH-21 | NTC_DEPTH_P0 | 10.0 | NTC 靶深>10× → P1 污染（报错不中断，v2.9.0） |
+| TH-22 | TITV_P1 | 2.0 | Ti/Tv<2.0 → P2 |
+| TH-23 | CALL_RATE_P1 | 95.0 | call rate<95% → P2 |
+| TH-24 | DISK_MIN_FREE_GB | 200 | 开跑前剩余磁盘 P0 阻断线（v2.9.0 起 raise 中断） |
 | TH-25 | DISK_PER_SAMPLE_GB | 75 | 每样本磁盘估算 |
 | TH-26 | BWA_INDEX_MEM_GB | 17.0 | bwa-mem2 索引 mmap 常驻 |
 | TH-27 | SORT_MEM_MIN | 128 | sort 每线程下限 MB |
@@ -213,6 +214,8 @@ $WORK/
 | 2.7.0 | 2026-09-16 | 机 | DEC-19：样本名非常规字符判无效跳过（E2E 锚）；DEC-20：Step 0-6 拆 BatchCtx 方法（跨步骤状态挂 ctx，MultiQC 时序锚改锚 step6 方法）；config.PIPELINE_VERSION=2.7.0 与 DESIGN 同步（check_design 增校验）+ CLI --version + run_summary.run.pipeline_version + 交付 README 版本行；STATS_TIMEOUT_S=600 统一作用于 flagstat/stats/count_records/query_lines/对账（runner.out 支持 timeout 透传，GATK/bwa 长任务仍无超时）；LICENSE（MIT）；测试 92→95（白名单 E2E 锚/--version/timeout 传递）；真实批次 dry-run+--step 0 冒烟 success（RUN-31） |
 | 2.8.0 | 2026-09-16 | 人 | 样本名非法收紧：从判无效跳过改为 **P0 级错误直接中断分析** |
 | 2.8.0 | 2026-09-16 | 机 | DEC-19 更新：bad_names 预检记 P0 异常项（随启动通知可见）后随 missing_deps 一同 raise RuntimeError 中断批次（批次 failed/退出码 1；多批次隔离不变；dry-run 同样触发）；移除 v2.7.0 的剔除继续逻辑；测试断言改为期望失败；顺带修复相对 --input 回落 $WORK 绕过 GWAS_RAW_DATA 覆盖的隐患（改按 RAW_DATA_DIR 语境解析+回归锚，RUN-32 验证事故暴露）；测试 95→96（RUN-32） |
+| 2.9.0 | 2026-09-16 | 人 | 分级体系修正：P0 收敛为严重影响分析并直接中断（如样本名非法）；其余原 P0/P1 降为 P1/P2；质量问题只报错不中断；并要求输出缺失/分级不当/推荐项审计清单 |
+| 2.9.0 | 2026-09-16 | 机 | DEC-21：P0=阻断级统一 raise（依赖/样本名/磁盘新增/md5 新增，中断批次退出码 1）；P1=执行失败隔离+NTC 污染+mapped<90（不再判样本失败，qc_judgement 改记录）；P2=全部质量阈值与对账（alerts 全量降级，LEVEL_ORDER 三级）；通知 tag 三级化；测试断言全量更新+磁盘阈值测试豁免；审计清单（缺失/建议项）随 RUN-33 交付（RUN-33） |
 
 ## 9. 证据索引 <!-- MACHINE -->
 
