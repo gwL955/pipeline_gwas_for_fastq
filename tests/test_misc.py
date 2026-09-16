@@ -86,6 +86,32 @@ class TestLoggerTee(unittest.TestCase):
             self.assertNotIn("logs", names)        # 无全局日志目录
             self.assertNotIn("run_summary.json", names)   # 无全局散文件
 
+    def test_full_flow_dry_run_zero_writes(self):
+        """★ 全流程 dry-run（有效样本走到 Step 5/6）必须 success 且零落盘。
+        gvcf.list 写入与 fastq_merged 目录创建曾无 dry-run 守卫——同日实跑过
+        目录已存在而被掩盖，跨日新日期目录直接 FileNotFoundError（RUN-27 修复）"""
+        import subprocess
+        with tempfile.TemporaryDirectory() as td:
+            bdir = os.path.join(td, "in", "260422")
+            os.makedirs(bdir)
+            for lane in ("L001", "L002"):
+                for r in ("R1", "R2"):
+                    with open(os.path.join(
+                            bdir, f"NA12878_S1_{lane}_{r}_001.fastq.gz"), "wb") as f:
+                        f.write(b"@x\nACGT\n+\nIIII\n")
+            env = {**os.environ, "GWAS_RESULTS": os.path.join(td, "results")}
+            r = subprocess.run(
+                [sys.executable,
+                 os.path.join(os.path.dirname(os.path.dirname(
+                     os.path.abspath(__file__))), "run_pipeline.py"),
+                 "--dry-run", "--input", os.path.join(td, "in")],
+                env=env, capture_output=True, text=True, timeout=90)
+            self.assertEqual(r.returncode, 0, r.stdout[-800:])
+            self.assertIn("批次 260422: success", r.stdout)
+            res = os.path.join(td, "results")
+            self.assertFalse(os.path.exists(res),
+                             "dry-run 不得在 results/ 落任何目录/文件")
+
     def test_console_only_logger_no_file(self):
         lg = Logger(None, prefix="X")
         lg.info("不落盘")          # 不应抛异常
@@ -114,7 +140,7 @@ class TestDirNaming(unittest.TestCase):
 
     def test_batch_delivery_dir(self):
         p = config.batch_delivery_dir("260422", "20260914")
-        self.assertTrue(p.endswith(os.path.join("delivery", "260422_20260914")))
+        self.assertTrue(p.endswith(os.path.join("Output", "260422_20260914")))
 
     def test_run_date_fixed_at_startup(self):
         """跨 0 点防回归锚（DEC-01）：执行日期必须取自启动时间戳 ts 一次性派生
@@ -128,6 +154,22 @@ class TestDirNaming(unittest.TestCase):
         # process_batch 只接受外部传入的 run_date，函数体内不再现取日期
         pb_src = inspect.getsource(run_pipeline.process_batch)
         self.assertNotIn("strftime(\"%Y%m%d\")", pb_src.replace("'", '"'))
+
+    def test_multiqc_ordering_after_all_steps_before_delivery(self):
+        """★ MultiQC 时序锚（v2.3.0 用户口径）：其他全部流程（含矩阵裁决与
+        每样本 VCF 重建）结束、QC 文件生成完全后才生成最终汇总报告，随后才
+        交付导出——防止回归成"裁决前跑 MultiQC"或"交付后才跑"（报告缺最后产物
+        或进不了交付目录）"""
+        import inspect
+        import run_pipeline
+        src = inspect.getsource(run_pipeline.process_batch)
+        i_rebuild = src.index('bdata["_adj_vcfs"] = adj_vcfs')
+        i_multiqc = src.index("run_multiqc")
+        i_export = src.index("export_delivery(")
+        self.assertLess(i_rebuild, i_multiqc,
+                        "MultiQC 必须在矩阵裁决与每样本 VCF 重建之后")
+        self.assertLess(i_multiqc, i_export,
+                        "MultiQC 报告生成后才交付导出（报告随交付拷贝）")
 
 
 class TestHostPythonGuard(unittest.TestCase):
@@ -180,37 +222,87 @@ class TestExportDelivery(unittest.TestCase):
         with tempfile.TemporaryDirectory() as src, \
                 tempfile.TemporaryDirectory() as dst:
             files = self._src(src)
+            mq = os.path.join(src, "GWAS-Panel_multiqc_report.html")
+            open(mq, "wb").write(b"<html>MQ</html>")
             with mock.patch.object(config, "DELIVERY_DIR", dst):
                 out = export_delivery(_FakeRunner(), "260422_20260914", files,
-                                      _FakeLog(), batch_note="｜批次 260422")
+                                      _FakeLog(), batch_note="｜批次 260422",
+                                      extra_files=[mq])
             self.assertTrue(out.endswith("260422_20260914"))
             names = os.listdir(out)
             for f in ("NA12878.PASS.adjudicated.vcf.gz",
                       "NA12878.PASS.adjudicated.vcf.gz.tbi",
+                      "GWAS-Panel_multiqc_report.html",
                       "md5sum.txt", "MANIFEST.tsv", "README.md"):
                 self.assertIn(f, names)
             import hashlib
             expect = hashlib.md5(b"VCF-A").hexdigest()
-            self.assertIn(f"{expect}  NA12878.PASS.adjudicated.vcf.gz",
-                          open(os.path.join(out, "md5sum.txt")).read())
+            md5s = open(os.path.join(out, "md5sum.txt")).read()
+            self.assertIn(f"{expect}  NA12878.PASS.adjudicated.vcf.gz", md5s)
+            self.assertIn(hashlib.md5(b"<html>MQ</html>").hexdigest()
+                          + "  GWAS-Panel_multiqc_report.html", md5s)
             man = open(os.path.join(out, "MANIFEST.tsv")).read()
             self.assertIn("sample\tfile\tsize_bytes\tmd5\trecords\tsource", man)
             self.assertIn(expect, man)
-            self.assertIn("DP≥" + str(config.DP_MIN),
-                          open(os.path.join(out, "README.md")).read())
+            self.assertIn("multiqc", man)          # 附加文件登记（sample 列=multiqc）
+            rdm = open(os.path.join(out, "README.md")).read()
+            self.assertIn("DP≥" + str(config.DP_MIN), rdm)
+            self.assertIn("MultiQC 汇总报告", rdm)  # 交付说明含 MultiQC 行
+
+    def test_export_delivery_without_extra_files(self):
+        """不传 extra_files 时行为与旧版一致（无 MultiQC 行/登记）"""
+        from run_pipeline import export_delivery
+        with tempfile.TemporaryDirectory() as src, \
+                tempfile.TemporaryDirectory() as dst:
+            files = self._src(src)
+            with mock.patch.object(config, "DELIVERY_DIR", dst):
+                out = export_delivery(_FakeRunner(), "B_20260914", files, _FakeLog())
+            names = os.listdir(out)
+            self.assertNotIn("GWAS-Panel_multiqc_report.html", names)
+            self.assertNotIn("MultiQC 汇总报告",
+                             open(os.path.join(out, "README.md")).read())
 
     def test_export_delivery_idempotent(self):
         from run_pipeline import export_delivery
         with tempfile.TemporaryDirectory() as src, \
                 tempfile.TemporaryDirectory() as dst:
             files = self._src(src)
+            mq = os.path.join(src, "GWAS-Panel_multiqc_report.html")
+            open(mq, "wb").write(b"<html>MQ</html>")
             with mock.patch.object(config, "DELIVERY_DIR", dst):
-                out1 = export_delivery(_FakeRunner(), "B_20260914", files, _FakeLog())
+                out1 = export_delivery(_FakeRunner(), "B_20260914", files, _FakeLog(),
+                                       extra_files=[mq])
                 mt1 = os.path.getmtime(os.path.join(out1, "NA12878.PASS.adjudicated.vcf.gz"))
-                out2 = export_delivery(_FakeRunner(), "B_20260914", files, _FakeLog())
+                mtq1 = os.path.getmtime(os.path.join(out1, os.path.basename(mq)))
+                out2 = export_delivery(_FakeRunner(), "B_20260914", files, _FakeLog(),
+                                       extra_files=[mq])
                 mt2 = os.path.getmtime(os.path.join(out2, "NA12878.PASS.adjudicated.vcf.gz"))
+                mtq2 = os.path.getmtime(os.path.join(out2, os.path.basename(mq)))
             self.assertEqual(out1, out2)
             self.assertEqual(mt1, mt2)      # 源未更新不重拷（mtime 保留）
+            self.assertEqual(mtq1, mtq2)    # 附加文件（MultiQC）同样幂等
+
+
+class TestDeliveryIndex(unittest.TestCase):
+
+    def test_index_accumulates_history(self):
+        """★ INDEX.md 累积锚（RUN-29）：合并 Output/ 全部历史交付目录 ∪ 本次运行——
+        曾只写本次运行批次，跨日新运行会把历史交付从索引中挤掉
+        （260422_20260914 在 260422/260720_20260916 运行后从索引消失）"""
+        from run_pipeline import write_delivery_index
+        with tempfile.TemporaryDirectory() as td:
+            for b in ("260422_20260914", "260720_20260916"):   # 历史交付（已在磁盘）
+                d = os.path.join(td, b)
+                os.makedirs(d)
+                open(os.path.join(d, "x.PASS.adjudicated.vcf.gz"), "wb").write(b"v")
+            new = os.path.join(td, "260529_20260916")           # 本次运行交付
+            os.makedirs(new)
+            open(os.path.join(new, "y.PASS.adjudicated.vcf.gz"), "wb").write(b"v")
+            with mock.patch.object(config, "DELIVERY_DIR", td):
+                idx = write_delivery_index({new})
+            body = open(idx, encoding="utf-8").read()
+            for b in ("260422_20260914", "260529_20260916", "260720_20260916"):
+                self.assertIn(b, body)          # 历史 + 本次全部在索引中
 
 
 if __name__ == "__main__":

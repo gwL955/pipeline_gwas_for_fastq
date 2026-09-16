@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""运行报告（markdown）与 run_summary.json 生成。仅标准库。
-（与 Illumina 比对报告相关函数已随比对模块移除，v2.0.0）"""
+"""运行报告（markdown）与 run_summary.json 生成。仅标准库。"""
 
 import json
 import os

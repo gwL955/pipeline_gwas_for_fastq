@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """变异后处理核心逻辑单测（对应踩坑：GT 列序必须与 VCF 样本序一致、
-rebuild 只换 GT 其余字段保留、矩阵 ./. 裁决阈值）
-（比对相关用例已随比对模块移除，v2.0.0）"""
+rebuild 只换 GT 其余字段保留、矩阵 ./. 裁决阈值、norm 产物检查口径）"""
 
 import os
 import sys
@@ -82,6 +81,33 @@ class TestRebuild(unittest.TestCase):
                         p = line.rstrip("\n").split("\t")
                         fo.write("\t".join([p[0], p[1], p[idx]]) + "\n")
                 self.assertEqual(open(gt_tsv).read().strip(), f"chr1\t100\t{want_col}")
+
+
+class TestNormSplitOutputs(unittest.TestCase):
+    """norm_split 产物检查口径（RUN-29）：norm 命令的 outputs 只含 vcf——
+    .tbi 由随后的 index 命令生成，混进本命令检查会在两命令之间必然误报
+    "命令成功但产物缺失/为空"（260422/260720 实跑两批各误报一次）"""
+
+    def test_norm_outputs_exclude_tbi(self):
+        calls = []
+
+        class _Runner:
+            def tool(self, key, args):
+                return args
+
+            def cpath(self, p):
+                return p
+
+            def run(self, cmd, logger=None, outputs=(), capture=False):
+                calls.append((cmd, list(outputs)))
+                return (0, "Lines total/split/joined/realigned: 1/0/0/0", "") \
+                    if capture else 0
+
+        ok, _ = mbc.norm_split(_Runner(), "in.vcf.gz", "out/split.vcf.gz", None)
+        self.assertTrue(ok)
+        self.assertEqual(len(calls), 2)                          # norm + index 两条
+        self.assertEqual(calls[0][1], ["out/split.vcf.gz"])       # norm 不检查 .tbi
+        self.assertEqual(calls[1][1], ["out/split.vcf.gz.tbi"])   # tbi 归 index 检查
 
 
 if __name__ == "__main__":

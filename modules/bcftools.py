@@ -24,11 +24,13 @@ def index_tbi(runner, vcf, logger):
 def norm_split(runner, in_vcf, out_vcf, logger):
     """bcftools norm -f genome.fa -m -any：拆多等位 + 左对齐 + REF 校验 + 建 tbi 索引
     （笔记 4-9：索引是 SelectVariants/多文件统计的前置）。
-    返回 (ok, stats_dict{total/split/realigned/skipped})"""
+    返回 (ok, stats_dict{total/split/realigned/skipped})。
+    norm 命令的 outputs 只写 vcf——.tbi 由随后的 index 命令生成，混进本命令的
+    产物检查会在两命令之间必然误报"命令成功但产物缺失/为空"（RUN-29）。"""
     rc, out, err = runner.run(
         _bc(runner, f"norm -f {runner.cpath(config.GENOME_FA)} -m -any "
                     f"{runner.cpath(in_vcf)} -Oz -o {runner.cpath(out_vcf)}"),
-        logger=logger, outputs=[out_vcf, str(out_vcf) + ".tbi"], capture=True)
+        logger=logger, outputs=[out_vcf], capture=True)
     stats = _parse_norm_stats((out or "") + (err or ""))
     if rc == 0:
         index_tbi(runner, out_vcf, logger)

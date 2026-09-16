@@ -48,8 +48,9 @@ for _k, _v in ENV_FILE_KEYS.items():       # setdefault：进程环境变量优�
 
 RAW_DATA_DIR = os.environ.get("GWAS_RAW_DATA", os.path.join(WORK_DIR, "0_raw_data"))
 RESULTS_ROOT = os.environ.get("GWAS_RESULTS", os.path.join(WORK_DIR, "results"))
-# 独立交付目录：最终交付文件 *.PASS.adjudicated.vcf.gz(+.tbi) + md5sum.txt + MANIFEST
-DELIVERY_DIR = os.environ.get("GWAS_DELIVERY_DIR", os.path.join(WORK_DIR, "delivery"))
+# 独立交付目录（v2.3.0 由 delivery/ 改名 Output/）：最终交付文件
+# *.PASS.adjudicated.vcf.gz(+.tbi) + MultiQC 报告 + md5sum.txt + MANIFEST
+DELIVERY_DIR = os.environ.get("GWAS_DELIVERY_DIR", os.path.join(WORK_DIR, "Output"))
 
 # ── 容器运行时 ──────────────────────────────────────────────────────────
 # 当前机器 singularity 实为 apptainer 1.4.5 别名；可切 apptainer
@@ -124,8 +125,6 @@ PCT_20X_P1 = 95.0               # Step6: ≥20x 靶比例 <95% → P1
 TITV_P1 = 2.0                   # Step6: Ti/Tv <2.0 → P1（结论口径）
 CALL_RATE_P1 = 95.0             # Step6: call rate <95% → P1（非 ./. 基因型比例）
 NTC_DEPTH_P0 = 10.0             # Step6: NTC 靶区深度 >10× → P0（污染）
-# 与 Illumina 结果的比对模块已移除（v2.0.0）：比对仅在流程构建期用于验收，
-# 后续按需独立执行，不再内置于常规运行
 
 # ── 钉钉机器人（地址等环境参数只来自 pipeline/.env 或进程环境变量，禁止硬编码） ──
 DINGTALK_WEBHOOK = os.environ.get("DINGTALK_WEBHOOK", "")   # 未配置 → 通知静默跳过
@@ -153,5 +152,5 @@ def batch_result_dir(batch, run_date=""):
 
 
 def batch_delivery_dir(batch, run_date=""):
-    """批次交付目录：delivery/<批次>_<执行日期>/（与结果目录同构）"""
+    """批次交付目录：Output/<批次>_<执行日期>/（与结果目录同构）"""
     return os.path.join(DELIVERY_DIR, f"{batch}_{run_date}" if run_date else batch)

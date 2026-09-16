@@ -8,8 +8,6 @@ Python3 **仅标准库**；所有生信工具经 singularity(apptainer) 容器�
 命令与参数以思源笔记《下机数据流程》0-5 为准（备查手册
 `$WORK/design_doc/notes_code_reference.md`，已回查笔记原文核对一致）；
 工程化约定以 `design_doc/DESIGN.md` 为准（`PROMPT_GWAS_pipeline.md` 为历史提示词）。
-**与 Illumina 同批次结果的比对模块已移除（v2.0.0）**：比对仅流程构建期验收使用，
-现按需独立执行，不属于常规运行。
 
 ---
 
@@ -30,8 +28,8 @@ python3 run_pipeline.py --dry-run --batch 260422
 python3 run_pipeline.py --batch 260422
 
 # ③ 全量：遍历 0_raw_data 下全部批次，逐批独立执行
-#    日志全自动落盘（程序接管 stdout/stderr tee 进 results/logs/run_<时间戳>.log，
-#    各批次另有 results/<批次>/logs/），无需 shell 重定向；nohup 仅用于后台防断线
+#    日志全自动落盘（程序接管 stdout/stderr tee 进 results/<批次>_<日期>/logs/run_<时间戳>.log），
+#    无需 shell 重定向；nohup 仅用于后台防断线
 nohup python3 run_pipeline.py --input 0_raw_data >/dev/null 2>&1 &
 
 # ④ 低配档核对 / 钉钉测试
@@ -90,8 +88,8 @@ python3 run_pipeline.py --notify-test    # 验证钉钉链路
      （样本名 = 去掉 `_S\d+_L\d+_R[12]_001.fastq.gz` 的前缀）
   2. 外送子目录：`20260720/<样本名>/<样本名>_R1.fastq.gz`
 - 批次内 `md5sum.txt` 存在时先做并行 md5 校验，失败样本终止分析并进入通知
-- **只读**：`0_raw_data/`、`back/`、`Output/`（Illumina 基准，独立比对用）一律只读；
-  一切产物写入 `results/<批次>_<执行日期>/`
+- **只读**：`0_raw_data/`、`back/` 一律只读；一切分析产物写入 `results/<批次>_<执行日期>/`；
+  交付文件仅由导出步骤写入 `Output/<批次>_<执行日期>/`（v2.3.0 前为 `delivery/`）
 - 输入校验：R1/R2 文件数不一致、单端、0 字节、命名不匹配 → 该样本标记无效并跳过
   （列入日志/通知/报告，不影响其余样本）；批次内无有效样本 → 跳过该批次并告警（退出码 0）
 - NTC 等对照样本：纳入 QC，默认排除出联合变异检测（`--exclude-samples` 可改）
@@ -103,7 +101,7 @@ python3 run_pipeline.py --notify-test    # 验证钉钉链路
 **批次结果目录 = `results/<批次名>_<执行日期>/`**（如 `results/260422_20260914/`）：
 每次运行的产物相互隔离、可追溯；**同一天重跑命中同一目录 → 幂等断点续跑**（已有产物
 `[SKIP]` 只补缺失），跨日运行自动开新目录全新计算。执行日期在启动时取一次（跨午夜
-不切换）。`--out` 可显式覆盖。交付目录同构：`delivery/<批次名>_<执行日期>/`。
+不切换）。`--out` 可显式覆盖。交付目录同构：`Output/<批次名>_<执行日期>/`。
 
 分析中间产物（可整目录删除后重算）：
 
@@ -126,18 +124,20 @@ results/260422_20260914/
 **`results/` 根目录下只有 `<批次>_<执行日期>/` 目录**——不产生全局 run_summary、
 全局 logs 等任何散文件（run_summary 逐批写入批次目录，最后完成的批次文件即全貌）。
 
-**最终交付文件**是每样本 `*.PASS.adjudicated.vcf.gz`，Step 6 结束后自动导出到
+**最终交付文件**是每样本 `*.PASS.adjudicated.vcf.gz`。Step 6 中**全部流程（含矩阵裁决与
+每样本 VCF 重建）结束、QC 文件生成完全后**，MultiQC 生成最终汇总报告，随后自动导出到
 **独立交付目录**（与分析工作区分离，`GWAS_DELIVERY_DIR` 可覆盖，默认
-`$WORK/delivery/<批次名>_<执行日期>/`）：
+`$WORK/Output/<批次名>_<执行日期>/`；v2.3.0 前为 `delivery/`，MultiQC 报告同批交付）：
 
 ```
-delivery/
-├── INDEX.md                            # 交付索引（各运行批次/目录/VCF 数）
+Output/
+├── INDEX.md                            # 交付索引（累积：扫描全部历史交付目录 ∪ 本次运行）
 └── 260422_20260914/
     ├── NA12878.PASS.adjudicated.vcf.gz (+.tbi)   # 交付主体
     ├── NA18544.PASS.adjudicated.vcf.gz (+.tbi)
+    ├── GWAS-Panel-下机数据-QC_multiqc_report.html  # MultiQC 全流程 QC 汇总（v2.3.0 起）
     ├── md5sum.txt                      # 标准格式，接收方 md5sum -c 直接校验
-    ├── MANIFEST.tsv                    # 样本/文件/大小/md5/记录数/来源
+    ├── MANIFEST.tsv                    # 样本/文件/大小/md5/记录数/来源（MultiQC 行 sample 列=multiqc）
     └── README.md                       # 交付口径说明（硬过滤→PASS→DP≥20 裁决重建）
 ```
 
@@ -228,7 +228,7 @@ OOM。完整实测记录（复现命令与数据）存服务器 `design_doc/`，
 | Step 2 · 比对 | mapped <95% 或 properly paired <85%（严于 QC 口径 90%） | P1 |
 | Step 3 · 去重 | 重复率 >30%（建库复杂度告急） | P1 |
 | Step 5 · 分型 | 任一步 exit≠0 或产物 0 字节（失败流程） | P0 |
-| Step 5 · 对账·数量 | 矩阵行数 ≠ 靶区记录数（view -T 对账） | P1 |
+| Step 5 · 对账·数量 | 矩阵行数 ≠ 靶区记录数（view -R 同口径对账，DEC-11） | P1 |
 | Step 5 · 对账·新鲜度 | 关键 VCF mtime < 本次启动（断点续跑复用旧产物） | P1 |
 | Step 6 · 捕获效率 | on-target <8%（小 panel 正常 8-10%）或 mean depth <50× | P1 |
 | Step 6 · 覆盖达标 | ≥20x 靶位点比例 <95% | P1 |

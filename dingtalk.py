@@ -104,7 +104,10 @@ def send_markdown(title, text, logger=None):
             resp_data = json.loads(resp.read().decode("utf-8"))
         ok = resp_data.get("errcode") == 0
         err = None if ok else str(resp_data)
-        if not ok and logger:
+        if ok:
+            if logger:
+                logger.info(f"钉钉已发送: {title}")   # 成功也留痕（RUN-29 前零记录）
+        elif logger:
             logger.warn(f"钉钉通知被拒绝: {resp_data}")
         return ok, err
     except Exception as e:   # noqa: BLE001  网络/限流等，降级

@@ -6,6 +6,7 @@
 import os
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -62,6 +63,34 @@ class TestNormalize(unittest.TestCase):
         items = [l for l in out.splitlines() if l.strip()]
         self.assertTrue(all(l.strip().startswith("- ") for l in items))
         self.assertEqual(len(items), 3)
+
+
+class TestSendLogging(unittest.TestCase):
+    """通知可观测性（RUN-29）：发送成功也要落一行 INFO——实跑 notify=on 但
+    日志零通知痕迹，无法事后确认钉钉是否真的发出（mock urlopen，不发网络）"""
+
+    def test_send_success_logs_info(self):
+        import urllib.request
+        import dingtalk
+        recorded = []
+
+        class _Log:
+            def info(self, msg):
+                recorded.append(("info", msg))
+
+            def warn(self, msg):
+                recorded.append(("warn", msg))
+
+        resp = mock.MagicMock()
+        resp.read.return_value = b'{"errcode": 0}'
+        cm = mock.MagicMock()
+        cm.__enter__.return_value = resp
+        with mock.patch.object(dingtalk.config, "DINGTALK_WEBHOOK", "https://x"), \
+                mock.patch.object(dingtalk.config, "DINGTALK_KEYWORD", ""), \
+                mock.patch.object(urllib.request, "urlopen", return_value=cm):
+            ok, err = dingtalk.send_markdown("[GWAS][OK] 标题X", "正文", logger=_Log())
+        self.assertTrue(ok)
+        self.assertTrue(any(lv == "info" and "标题X" in m for lv, m in recorded))
 
 
 if __name__ == "__main__":

@@ -168,7 +168,8 @@ def merged_paths(merged_dir, sm):
 
 def merge_all(samples, merged_dir, runner, log_for, workers):
     """并行合并；返回 (成功 dict[sm→(r1,r2)], 失败 dict[sm→reason])"""
-    os.makedirs(merged_dir, exist_ok=True)   # cat 输出目录必须先存在
+    if not runner.dry_run:   # dry-run 零落盘：不建目录（命令仅打印）
+        os.makedirs(merged_dir, exist_ok=True)   # cat 输出目录必须先存在
     ok, failed = {}, {}
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futs = {pool.submit(merge_sample, si, merged_dir, runner,

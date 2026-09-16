@@ -180,7 +180,11 @@ def process_batch(batch, batch_dir, args, plan, main_logger, run_date=""):
         # ── 开跑前检查（磁盘 / 依赖文件 / 样本名规范）──
         pre_anoms = []
         disk_path = work if os.path.isdir(work) else config.RESULTS_ROOT
-        free_gb = shutil.disk_usage(disk_path).free / 1e9
+        if not os.path.isdir(disk_path):   # dry-run 零落盘不建目录：沿祖先取存在的路径
+            disk_path = os.path.dirname(os.path.abspath(disk_path))
+            while disk_path and not os.path.isdir(disk_path):
+                disk_path = os.path.dirname(disk_path)
+        free_gb = shutil.disk_usage(disk_path or "/").free / 1e9
         need_gb = round(n_initial * config.DISK_PER_SAMPLE_GB)
         if free_gb < config.DISK_MIN_FREE_GB:
             pre_anoms.append(("P0", f"磁盘剩余 {free_gb:.0f}GB < {config.DISK_MIN_FREE_GB}GB"
@@ -530,13 +534,14 @@ def process_batch(batch, batch_dir, args, plan, main_logger, run_date=""):
             bdata["samples"]["calling"] = hc_ok   # 实际进入联合分型的样本（排序）
             log.result(f"HaplotypeCaller 完成 {len(hc_ok)}/{len(calling)}，进入联合分型")
 
-            # cohort 级（串行，gvcf.list 每次重新生成）
+            # cohort 级（串行，gvcf.list 每次重新生成；dry-run 零落盘只打印命令）
             coh = os.path.join(work, "cohort")
             gvcf_list = os.path.join(coh, "gvcf.list")
-            with open(gvcf_list, "w", encoding="utf-8") as f:
-                for sm in sorted(hc_ok):
-                    f.write(ctx.runner.cpath(os.path.join(work, "gvcf", f"{sm}.g.vcf.gz")) + "\n")
-            log.info(f"gvcf.list 重新生成: {len(hc_ok)} 个 gVCF（批次内联合，严禁跨批次）")
+            if not ctx.runner.dry_run:
+                with open(gvcf_list, "w", encoding="utf-8") as f:
+                    for sm in sorted(hc_ok):
+                        f.write(ctx.runner.cpath(os.path.join(work, "gvcf", f"{sm}.g.vcf.gz")) + "\n")
+                log.info(f"gvcf.list 重新生成: {len(hc_ok)} 个 gVCF（批次内联合，严禁跨批次）")
             combined = os.path.join(coh, "cohort.g.vcf.gz")
             raw_vcf = os.path.join(coh, "cohort.raw.vcf.gz")
             if not mgatk.combine_gvcfs(ctx.runner, gvcf_list, combined,
@@ -642,7 +647,7 @@ def process_batch(batch, batch_dir, args, plan, main_logger, run_date=""):
                     view_n = int(view_n_out.strip().split()[-1])
                 except (ValueError, IndexError):
                     view_n = None
-                log.result(f"对账·数量: 矩阵 {matrix_n} 行 vs view -T 计数 {view_n}")
+                log.result(f"对账·数量: 矩阵 {matrix_n} 行 vs view -R 计数 {view_n}")
                 if view_n is not None and matrix_n != view_n:
                     recon_anoms.append(("P1", f"对账·数量：矩阵行数 {matrix_n} ≠ 靶区记录数 "
                                               f"{view_n}（导出可能不完整）"))
@@ -782,16 +787,11 @@ def process_batch(batch, batch_dir, args, plan, main_logger, run_date=""):
                 bdata["artifacts"]["per_sample_adjudicated_dir"] = \
                     os.path.join(work, "per_sample_vcf")
                 bdata["_adj_vcfs"] = adj_vcfs
-                # 最终交付导出：独立 delivery/<批次>_<日期>/（VCF+md5sum+MANIFEST，幂等）
-                delivery_dir = export_delivery(ctx.runner, f"{batch}_{run_date}",
-                                               adj_vcfs, log,
-                                               batch_note=f"｜批次 {batch}")
-                if delivery_dir:
-                    bdata["artifacts"]["delivery_dir"] = delivery_dir
             elif ctx.runner.dry_run:
                 log.info("[DRY-RUN] 跳过裁决与每样本 VCF 重建的实际计算")
 
-            # MultiQC（串行）
+            # MultiQC（串行）：其他全部流程结束、qc/ 产物生成完全后，
+            # 才生成最终汇总报告（fastqc/fastp/比对/去重/BQSR/覆盖度全量输入）
             if not ctx.runner.dry_run:
                 mmultiqc.run_multiqc(ctx.runner, os.path.join(work, "qc"),
                                      os.path.join(work, "qc", "multiqc"), log)
@@ -799,6 +799,17 @@ def process_batch(batch, batch_dir, args, plan, main_logger, run_date=""):
                                                    "*multiqc_report.html")))
                 if mq:
                     bdata["artifacts"]["multiqc"] = mq[-1]
+
+                # 交付导出：独立 Output/<批次>_<日期>/
+                # （VCF+tbi+MultiQC 报告+md5sum+MANIFEST，幂等；裁决未产出则不导出）
+                if bdata.get("_adj_vcfs"):
+                    delivery_dir = export_delivery(
+                        ctx.runner, f"{batch}_{run_date}", bdata["_adj_vcfs"], log,
+                        batch_note=f"｜批次 {batch}",
+                        extra_files=(bdata["artifacts"]["multiqc"],)
+                        if bdata["artifacts"].get("multiqc") else ())
+                    if delivery_dir:
+                        bdata["artifacts"]["delivery_dir"] = delivery_dir
             step_time("step6")
 
             # Step6 里程碑：捕获效率 / 覆盖达标 / 结论口径 / NTC 污染
@@ -890,35 +901,57 @@ def _avg(d):
     return round(sum(vals) / len(vals), 2) if vals else None
 
 
-# ── 最终交付导出：独立 delivery/<批次>/ 目录 ────────────────────────────
-def export_delivery(runner, batch, adj_vcfs, log, batch_note=""):
-    """把最终交付文件 *.PASS.adjudicated.vcf.gz(+.tbi) 复制到独立交付目录，
-    生成标准 md5sum.txt（可 md5sum -c 校验）、MANIFEST.tsv（含记录数/md5/来源）
-    与交付说明 README.md。幂等：源未更新则不复制，manifest 每次重生成。"""
+# ── 最终交付导出：独立 Output/<批次>/ 目录 ────────────────────────────
+def export_delivery(runner, batch, adj_vcfs, log, batch_note="", extra_files=()):
+    """把最终交付文件 *.PASS.adjudicated.vcf.gz(+.tbi) 与附加文件（MultiQC
+    报告等）复制到独立交付目录，生成标准 md5sum.txt（可 md5sum -c 校验）、
+    MANIFEST.tsv（含记录数/md5/来源）与交付说明 README.md。
+    幂等：源未更新则不复制，manifest 每次重生成。"""
     import hashlib
     dbatch = config.batch_delivery_dir(batch)   # batch 参数已是"<批次>_<日期>"标签
     os.makedirs(dbatch, exist_ok=True)
     rows, md5_lines = [], []
+
+    def _copy_idempotent(src, logname="复制"):
+        dst = os.path.join(dbatch, os.path.basename(src))
+        if not nonempty(dst) or os.path.getmtime(src) > os.path.getmtime(dst):
+            shutil.copy2(src, dst)
+            log.info(f"[交付] {logname} {os.path.basename(src)}")
+        return dst
+
+    def _md5(path):
+        h = hashlib.md5()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 22), b""):
+                h.update(chunk)
+        return h.hexdigest()
+
     for sm in sorted(adj_vcfs):
         src = str(adj_vcfs[sm])
         if not nonempty(src):
             continue
-        dst = os.path.join(dbatch, os.path.basename(src))
-        if not nonempty(dst) or os.path.getmtime(src) > os.path.getmtime(dst):
-            shutil.copy2(src, dst)
-            log.info(f"[交付] 复制 {os.path.basename(src)}")
+        dst = _copy_idempotent(src)
         if nonempty(src + ".tbi"):
-            dst_tbi = dst + ".tbi"
-            if not nonempty(dst_tbi) or os.path.getmtime(src + ".tbi") > os.path.getmtime(dst_tbi):
-                shutil.copy2(src + ".tbi", dst_tbi)
-        h = hashlib.md5()
-        with open(dst, "rb") as f:
-            for chunk in iter(lambda: f.read(1 << 22), b""):
-                h.update(chunk)
-        md5 = h.hexdigest()
+            _copy_idempotent(src + ".tbi", logname="复制索引")
+        md5 = _md5(dst)
         records = mbc.count_records(runner, dst) if not runner.dry_run else None
-        rows.append((sm, os.path.basename(dst), os.path.getsize(dst), md5, records, src))
+        rows.append((sm, os.path.basename(dst), os.path.getsize(dst),
+                     md5, records, src))
         md5_lines.append(f"{md5}  {os.path.basename(dst)}")
+    n_vcf = len(rows)
+    # 附加交付文件（MultiQC 报告等）：平铺进交付目录，同样幂等并纳入校验清单
+    extra_names = []
+    for src in extra_files:
+        src = str(src)
+        if not nonempty(src):
+            continue
+        dst = _copy_idempotent(src, logname="复制附件")
+        kind = "multiqc" if "multiqc" in os.path.basename(src).lower() else "extra"
+        md5 = _md5(dst)
+        rows.append((kind, os.path.basename(dst), os.path.getsize(dst),
+                     md5, "-", src))
+        md5_lines.append(f"{md5}  {os.path.basename(dst)}")
+        extra_names.append(os.path.basename(dst))
     if not rows:
         return None
     with open(os.path.join(dbatch, "md5sum.txt"), "w", encoding="utf-8") as f:
@@ -932,16 +965,43 @@ def export_delivery(runner, batch, adj_vcfs, log, batch_note=""):
     with open(readme, "w", encoding="utf-8") as f:
         f.write(f"# {batch} 批次最终交付\n\n"
                 f"- 导出时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}{batch_note}\n"
-                f"- 交付文件：`<样本>.PASS.adjudicated.vcf.gz`（+ `.tbi` 索引）× {len(rows)}\n"
-                f"- 口径：GATK HaplotypeCaller（gVCF 联合分型）→ SNP/INDEL 硬过滤 → PASS →"
+                f"- 交付文件：`<样本>.PASS.adjudicated.vcf.gz`（+ `.tbi` 索引）× {n_vcf}\n")
+        if extra_names:
+            f.write(f"- MultiQC 汇总报告：`{extra_names[0] if len(extra_names) == 1 else '…'}"
+                    f"`（fastqc/fastp/比对/去重/BQSR/覆盖度等全流程 QC 汇总）\n")
+        f.write(f"- 口径：GATK HaplotypeCaller（gVCF 联合分型）→ SNP/INDEL 硬过滤 → PASS →"
                 f" 矩阵 `./.` 按 mosdepth 靶区深度 DP≥{config.DP_MIN} 裁决后重建的"
                 f"每样本 VCF（仅替换 GT，其余字段原样保留）\n"
                 f"- 校验：`md5sum -c md5sum.txt`；明细见 MANIFEST.tsv"
                 f"（样本/文件/大小/md5/记录数/来源）\n"
                 f"- 生成流程版本：{config.WORK_DIR}/pipeline（README 含完整口径与差异记录）\n")
-    log.result(f"[交付] {dbatch}: VCF ×{len(rows)} + md5sum.txt + MANIFEST.tsv"
+    log.result(f"[交付] {dbatch}: VCF ×{n_vcf} + md5sum.txt + MANIFEST.tsv"
+               + (f" + 附件 ×{len(extra_names)}" if extra_names else "")
                + ("（README 更新）" if have else ""))
     return dbatch
+
+
+def write_delivery_index(delivered_dirs):
+    """Output/INDEX.md 交付总索引：**累积合并**——扫描 Output/ 下全部批次交付
+    目录 ∪ 本次运行的交付目录（多次运行隔离下历史交付不丢索引；RUN-29 前只写
+    本次运行批次，跨日运行会把历史交付从索引中挤掉）。无任何目录时返回 None。"""
+    dirs = set(delivered_dirs)
+    if os.path.isdir(config.DELIVERY_DIR):
+        dirs |= {os.path.join(config.DELIVERY_DIR, d)
+                 for d in os.listdir(config.DELIVERY_DIR)
+                 if os.path.isdir(os.path.join(config.DELIVERY_DIR, d))}
+    if not dirs:
+        return None
+    idx = os.path.join(config.DELIVERY_DIR, "INDEX.md")
+    os.makedirs(config.DELIVERY_DIR, exist_ok=True)
+    with open(idx, "w", encoding="utf-8") as f:
+        f.write(f"# 交付索引\n\n- 生成时间："
+                f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+                f"| 批次_日期 | 交付目录 | VCF 数 |\n| --- | --- | --- |\n")
+        for p in sorted(dirs, key=os.path.basename):
+            n = len([x for x in os.listdir(p) if x.endswith(".vcf.gz")])
+            f.write(f"| {os.path.basename(p)} | `{p}` | {n} |\n")
+    return idx
 
 
 def _step_anoms(ctx, step_prefix):
@@ -991,8 +1051,11 @@ def _notify_result(batch, bdata, plan, log):
         text += "\n\n异常: 无"
     delivery = (bdata.get("artifacts") or {}).get("delivery_dir")
     if delivery:
+        dnames = os.listdir(delivery)
         text += f"\n\n交付: {delivery}（*.PASS.adjudicated.vcf.gz ×"
-        text += f"{len([f for f in os.listdir(delivery) if f.endswith('.vcf.gz')])}"
+        text += f"{len([f for f in dnames if f.endswith('.vcf.gz')])}"
+        if any("multiqc_report.html" in f for f in dnames):
+            text += " + MultiQC"
         text += " + md5sum.txt + MANIFEST.tsv）"
     text += (f"\n\n产物: {bdata.get('work_dir')}（cohort.PASS / 矩阵 / 每样本裁决VCF / "
              f"MultiQC）"
@@ -1110,21 +1173,13 @@ def main():
         if bdata["status"] in ("failed", "partial"):
             any_failed = True
 
-    # 交付总索引：delivery/INDEX.md（各批次交付目录一览）
-    delivered = {b: d.get("artifacts", {}).get("delivery_dir")
-                 for b, d in summary["batches"].items()}
-    delivered = {b: p for b, p in delivered.items() if p}
+    # 交付总索引：Output/INDEX.md（累积合并全部历史交付目录；仅实跑交付后触发，
+    # dry-run 零落盘不重写）
+    delivered = {d.get("artifacts", {}).get("delivery_dir")
+                 for d in summary["batches"].values()}
+    delivered = {p for p in delivered if p}
     if delivered:
-        idx = os.path.join(config.DELIVERY_DIR, "INDEX.md")
-        os.makedirs(config.DELIVERY_DIR, exist_ok=True)
-        with open(idx, "w", encoding="utf-8") as f:
-            f.write(f"# 交付索引\n\n- 生成时间："
-                    f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
-                    f"| 批次 | 交付目录 | VCF 数 |\n| --- | --- | --- |\n")
-            for b in sorted(delivered):
-                n = len([x for x in os.listdir(delivered[b])
-                         if x.endswith(".vcf.gz")])
-                f.write(f"| {b} | `{delivered[b]}` | {n} |\n")
+        idx = write_delivery_index(delivered)
         summary["delivery_index"] = idx
         if last_summary_path and not args.dry_run:
             report_mod.write_run_summary(summary, last_summary_path)
