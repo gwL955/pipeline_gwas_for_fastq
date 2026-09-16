@@ -74,6 +74,7 @@ python3 run_pipeline.py --notify-test    # 验证钉钉链路
 | `CONTAINER_RT` | 容器运行时（本机 singularity 实为 apptainer 别名） | `singularity` |
 | `GWAS_ENV_FILE` | `.env` 文件本身的位置 | `pipeline/.env` |
 | `GWAS_RAW_DATA` / `GWAS_RESULTS` / `GWAS_DELIVERY_DIR` | 输入/结果/交付目录覆盖 | 基于 `$WORK` 推导 |
+| `GWAS_REFERENCE_DIR` / `GWAS_SIF_DIR` | 参考文件/容器镜像目录重定向（测试与多工作区部署用） | `$WORK/reference`、`$WORK/singularity` |
 | `GWAS_DP_MIN` / `GWAS_DISK_MIN_FREE_GB` / `GWAS_DISK_PER_SAMPLE_GB` | 可覆盖阈值（TH-15/24/25） | 20 / 200 / 75 |
 
 语法：`KEY=VALUE`；`#` 整行注释，裸值支持行内 ` #` 注释，引号值原样保留。

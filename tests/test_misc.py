@@ -16,6 +16,25 @@ import config                                      # noqa: E402
 from logger import Logger, capture_stdio           # noqa: E402
 
 
+def _dep_env(td):
+    """E2E dry-run 的哑依赖环境：开跑前 P0 依赖检查（reference/SIF 缺失即
+    RuntimeError 中止——实跑快速失败语义）要求非空文件存在；CI/干净克隆没有
+    真实数据，经 GWAS_REFERENCE_DIR/GWAS_SIF_DIR 重定向到临时哑树即可全流程
+    dry-run（dry-run 不执行命令，哑文件内容无关）"""
+    ref = os.path.join(td, "deps", "reference")
+    sif = os.path.join(td, "deps", "singularity")
+    os.makedirs(os.path.join(ref, "genome"), exist_ok=True)
+    os.makedirs(sif, exist_ok=True)
+    for n in ("genome.fa", "genome.fa.fai", "genome.dict"):
+        open(os.path.join(ref, "genome", n), "wb").write(b"x")
+    for n in ("targets.bed", "Homo_sapiens_assembly38.dbsnp138.vcf.gz",
+              "Mills_and_1000G_gold_standard.indels.hg38.vcf.gz"):
+        open(os.path.join(ref, n), "wb").write(b"x")
+    for v in config.SIF.values():
+        open(os.path.join(sif, os.path.basename(v)), "wb").write(b"x")
+    return {"GWAS_REFERENCE_DIR": ref, "GWAS_SIF_DIR": sif}
+
+
 class TestLoggerTee(unittest.TestCase):
 
     def test_capture_stdio_mirrors_to_file(self):
@@ -69,7 +88,7 @@ class TestLoggerTee(unittest.TestCase):
             for r in ("R1", "R2"):
                 with open(os.path.join(bdir, f"S1_L001_{r}_001.fastq.gz"), "wb") as f:
                     f.write(b"x")
-            env = {**os.environ,
+            env = {**os.environ, **_dep_env(td),
                    "GWAS_RESULTS": os.path.join(td, "results")}
             r = subprocess.run(
                 [sys.executable,
@@ -102,7 +121,8 @@ class TestLoggerTee(unittest.TestCase):
                     with open(os.path.join(
                             bdir, f"NA12878_S1_{lane}_{r}_001.fastq.gz"), "wb") as f:
                         f.write(b"@x\nACGT\n+\nIIII\n")
-            env = {**os.environ, "GWAS_RESULTS": os.path.join(td, "results")}
+            env = {**os.environ, **_dep_env(td),
+                   "GWAS_RESULTS": os.path.join(td, "results")}
             r = subprocess.run(
                 [sys.executable,
                  os.path.join(os.path.dirname(os.path.dirname(

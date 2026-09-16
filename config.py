@@ -55,8 +55,9 @@ DELIVERY_DIR = os.environ.get("GWAS_DELIVERY_DIR", os.path.join(WORK_DIR, "Outpu
 # ── 容器运行时 ──────────────────────────────────────────────────────────
 # 当前机器 singularity 实为 apptainer 1.4.5 别名；可切 apptainer
 CONTAINER_RT = os.environ.get("CONTAINER_RT", "singularity")
-# 镜像目录固定为 pipeline 同级的 $WORK/singularity/（目录约定，不走 .env）
-SIF_DIR = os.path.join(WORK_DIR, "singularity")
+# 镜像目录默认 pipeline 同级的 $WORK/singularity/（目录约定，不走 .env 默认值；
+# GWAS_SIF_DIR 可重定向——测试/多工作区部署用）
+SIF_DIR = os.environ.get("GWAS_SIF_DIR", os.path.join(WORK_DIR, "singularity"))
 SIF = {
     "fastqc":    os.path.join(SIF_DIR, "fastqc_0.12.1.sif"),
     "fastp":     os.path.join(SIF_DIR, "fastp_1.3.6.sif"),
@@ -68,8 +69,8 @@ SIF = {
     "multiqc":   os.path.join(SIF_DIR, "multiqc_1.35.sif"),
 }
 
-# ── 参考文件 ────────────────────────────────────────────────────────────
-REF_DIR = os.path.join(WORK_DIR, "reference")
+# ── 参考文件（GWAS_REFERENCE_DIR 可重定向，默认 $WORK/reference/） ──────
+REF_DIR = os.environ.get("GWAS_REFERENCE_DIR", os.path.join(WORK_DIR, "reference"))
 GENOME_FA = os.path.join(REF_DIR, "genome", "genome.fa")          # hg38 + bwa-mem2 索引
 GENOME_DICT = os.path.join(REF_DIR, "genome", "genome.dict")
 DBSNP_VCF = os.path.join(REF_DIR, "Homo_sapiens_assembly38.dbsnp138.vcf.gz")

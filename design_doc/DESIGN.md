@@ -206,7 +206,7 @@ $WORK/
 | 2.5.0 | 2026-09-16 | 人 | 依据 0_raw_data_test 实跑日志分析（RUN-29 前置）确认执行 4 项修复：norm 误报 WARN、对账日志文案 -T→-R、钉钉发送成功落日志、交付 INDEX 累积 |
 | 2.5.0 | 2026-09-16 | 机 | ① norm_split 的 norm 命令 outputs 去 .tbi（该索引由后续 index 命令生成，混入检查必误报"产物缺失"）；② 对账 RESULT 文案 view -T→-R（命令本身已是 -R，DEC-11，文案过时误导排查）；③ send_markdown 成功时 logger.info 落一行"钉钉已发送: 标题"（此前 notify=on 但日志零通知痕迹）；④ INDEX.md 改累积合并（write_delivery_index：扫描 Output/ 全部历史交付目录 ∪ 本次运行；曾整体重写致历史交付 260422_20260914 从索引消失）并即时重生成找回；测试 89→92（norm outputs 口径/发送成功日志/索引累积锚）；tests+check_design 全绿；dry-run 零落盘复验（RUN-29） |
 | 2.6.0 | 2026-09-16 | 人 | design_doc 移入 pipeline/ 随仓库管理（PROMPT 与内部版 README_pipeline 不入库）；仓库增加 GitHub Actions CI |
-| 2.6.0 | 2026-09-16 | 机 | design_doc/ 迁至 pipeline/ 内（DESIGN/notes_code_reference/RUN_HISTORY 入库；PROMPT_GWAS_pipeline.md 含 webhook token、README_pipeline.md 自我声明不对外——两者进 .gitignore）；check_design 路径改为 pipeline 内相对（克隆仓库即可全绿跑 run_tests.sh）；新增 .github/workflows/ci.yml（py3.10/3.12 矩阵跑 run_tests.sh）；测试 CI 兼容化：rt 解析用例自包含（临时 PATH 植入假运行时，无 singularity 环境可验）、两个端到端 dry-run 用例加 --resource-profile low（CI runner 内存 ~16G < auto 档单样本峰值 19.8G 会快速失败）；92 tests+check_design 全绿（RUN-30） |
+| 2.6.0 | 2026-09-16 | 机 | design_doc/ 迁至 pipeline/ 内（DESIGN/notes_code_reference/RUN_HISTORY 入库；PROMPT_GWAS_pipeline.md 含 webhook token、README_pipeline.md 自我声明不对外——两者进 .gitignore）；check_design 路径改为 pipeline 内相对（克隆仓库即可全绿跑 run_tests.sh）；新增 .github/workflows/ci.yml（py3.10/3.12 矩阵跑 run_tests.sh）；测试 CI 兼容化：rt 解析用例自包含（临时 PATH 植入假运行时，无 singularity 环境可验）、两个端到端 dry-run 用例加 --resource-profile low（CI runner 内存 ~16G < auto 档单样本峰值 19.8G 会快速失败）；CI 首跑失败修复：GWAS_REFERENCE_DIR/GWAS_SIF_DIR 可重定向（默认不变），E2E dry-run 用例经 _dep_env 自备哑依赖树——开跑前 P0 依赖缺失快速失败是实跑语义，予以保留；干净克隆模拟 CI 复验全绿。92 tests+check_design 全绿（RUN-30） |
 
 ## 9. 证据索引 <!-- MACHINE -->
 
