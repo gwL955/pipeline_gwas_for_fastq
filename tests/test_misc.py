@@ -140,8 +140,9 @@ class TestLoggerTee(unittest.TestCase):
                              "dry-run 不得在 results/ 落任何目录/文件")
 
     def test_bad_sample_name_rejected(self):
-        """★ 样本名白名单锚（DEC-19/RUN-31）：非常规字符（如 ;）判无效跳过——
-        样本名进入 shell 命令拼接与 bwa @RG 头，此前仅 P1 告警照常处理属注入面"""
+        """★ 样本名白名单 P0 阻断锚（DEC-19/RUN-32）：非常规字符（如 ;）→
+        P0 级错误直接中断分析（退出码非零、批次 failed）——样本名进入 shell
+        命令拼接与 @RG 头属注入面；v2.7.0 曾为剔除继续，v2.8.0 收紧为阻断"""
         import subprocess
         with tempfile.TemporaryDirectory() as td:
             bdir = os.path.join(td, "in", "B")
@@ -160,9 +161,29 @@ class TestLoggerTee(unittest.TestCase):
                  "--dry-run", "--resource-profile", "low",
                  "--input", os.path.join(td, "in")],
                 env=env, capture_output=True, text=True, timeout=90)
-            self.assertEqual(r.returncode, 0, r.stdout[-500:])
-            self.assertIn("判无效跳过", r.stdout)          # 非法名被剔除
-            self.assertIn("有效样本 1 个", r.stdout)        # 合法样本照常处理
+            self.assertEqual(r.returncode, 1, r.stdout[-500:])   # 批次 failed
+            self.assertIn("开跑前-P0", r.stdout)                  # P0 异常项落日志
+            self.assertIn("样本名含非常规字符", r.stdout)
+            self.assertIn("bad;name", r.stdout)                   # 指名道姓
+            self.assertNotIn("有效样本 1 个", r.stdout)            # 不再剔除继续
+
+    def test_relative_input_respects_raw_data_override(self):
+        """★ --input 相对路径解析锚（RUN-32 事故）：相对名优先在 RAW_DATA_DIR
+        （含 GWAS_RAW_DATA 覆盖）下解析——曾直接回落 $WORK/0_raw_data，导致
+        验证脚本带着覆盖变量却扫到真实批次发起实跑"""
+        import subprocess
+        with tempfile.TemporaryDirectory() as td:
+            os.makedirs(os.path.join(td, "raw", "0_raw_data", "DEMO"))
+            env = {**os.environ,
+                   "GWAS_RAW_DATA": os.path.join(td, "raw", "0_raw_data"),
+                   "GWAS_RESULTS": os.path.join(td, "res")}
+            r = subprocess.run(
+                [sys.executable,
+                 os.path.join(os.path.dirname(os.path.dirname(
+                     os.path.abspath(__file__))), "run_pipeline.py"),
+                 "--dry-run", "--input", "0_raw_data"],
+                env=env, capture_output=True, text=True, timeout=60)
+            self.assertIn("待处理批次: ['DEMO']", r.stdout)
 
     def test_cli_version_flag(self):
         """--version：输出版本并退出码 0（与 DESIGN.md 同步，check_design 校验）"""

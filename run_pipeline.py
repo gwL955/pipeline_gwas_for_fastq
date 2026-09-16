@@ -145,7 +145,7 @@ class BatchCtx:
 
     # ── step0_scan ──
     def step0_scan(self):
-        """Step 0：清点/样本名白名单（DEC-19）/md5/磁盘与依赖预检/Lane 合并/samples.tsv。
+        """Step 0：清点/md5/磁盘依赖与样本名预检（DEC-19：P0 阻断）/Lane 合并/samples.tsv。
         无有效样本时返回 bdata（批次 skipped），正常返回 None。"""
         self._t0 = time.time()
         valid, invalid = scanner.scan_batch(self.batch_dir)
@@ -155,14 +155,6 @@ class BatchCtx:
                 if sm not in keep:
                     invalid[sm] = "未在 --samples 白名单"
                     del valid[sm]
-        # 样本名白名单不匹配 → 判无效跳过（DEC-19：样本名会进入 shell 命令拼接
-        # 与 bwa @RG 头，非常规字符属注入面；与 R1/R2 不匹配同级处置，
-        # 置于"无有效样本"早退之前——全部无效时批次跳过而非失败）
-        bad_names = [sm for sm in valid if not re.fullmatch(r"[A-Za-z0-9_.\-]+", sm)]
-        for sm in bad_names:
-            self.log.error(f"样本名含非常规字符（须 A-Za-z0-9_.-），样本 {sm} 判无效跳过")
-            invalid[sm] = "样本名含非常规字符（判无效）"
-            valid.pop(sm, None)
         self.bdata["samples"]["valid"] = sorted(valid)
         self.bdata["samples"]["invalid"] = invalid
         if not valid:
@@ -203,9 +195,12 @@ class BatchCtx:
         if missing_deps:
             pre_anoms.append(("P0", "依赖文件缺失或 0 字节: "
                               + ", ".join(os.path.basename(p) for p in missing_deps)))
-        bad_names_anom = ([("P1", f"{len(bad_names)} 个样本名非常规字符已判无效: "
-                                  + ", ".join(sorted(bad_names)))] if bad_names else [])
-        pre_anoms += bad_names_anom
+        # 样本名白名单（DEC-19，v2.8.0 起 P0 阻断）：样本名进入 shell 命令拼接
+        # 与 bwa @RG 头，非常规字符属注入面——直接中断分析，不剔除继续
+        bad_names = [sm for sm in valid if not re.fullmatch(r"[A-Za-z0-9_.\-]+", sm)]
+        if bad_names:
+            pre_anoms.append(("P0", "样本名含非常规字符（须 A-Za-z0-9_.-）: "
+                              + ", ".join(sorted(bad_names))))
         for lv, msg in pre_anoms:
             (self.log.error if lv == "P0" else self.log.warn)(f"[开跑前-{lv}] {msg}")
 
@@ -240,6 +235,9 @@ class BatchCtx:
             dingtalk.notify(f"[GWAS][{lvl}] {self.batch}批次 · 启动", body, logger=self.log)
         if missing_deps:
             raise RuntimeError(f"开跑前检查 P0：依赖文件缺失 → {'; '.join(missing_deps)}")
+        if bad_names:
+            raise RuntimeError(f"开跑前检查 P0：样本名非常规字符（注入面，中断分析）→ "
+                               f"{'; '.join(sorted(bad_names))}")
 
         self.merged, merge_failed = scanner.merge_all(
             valid, os.path.join(self.work, "fastq_merged"), self.runner,
@@ -1180,8 +1178,14 @@ def main():
 
     # 批次发现：--batch 优先；否则遍历 --input 下全部批次子目录逐批独立执行
     # 相对路径按 $WORK 解析（如 --input 0_raw_data，无论从哪个 cwd 启动）
-    input_root = args.input if os.path.isdir(args.input) \
-        else os.path.join(config.WORK_DIR, args.input)
+    # 相对 --input 按 RAW_DATA_DIR 语境解析（尊重 GWAS_RAW_DATA 覆盖——RUN-32
+    # 事故：曾回落 $WORK/0_raw_data，验证脚本带着覆盖变量却扫到真实批次实跑）：
+    # 同名即原始数据根本身，其余视为其子目录；绝不回落 $WORK
+    input_root = args.input
+    if not os.path.isdir(input_root):
+        input_root = config.RAW_DATA_DIR \
+            if os.path.basename(config.RAW_DATA_DIR) == args.input \
+            else os.path.join(config.RAW_DATA_DIR, args.input)
     if args.batch:
         batches = [(args.batch, os.path.join(input_root, args.batch))]
         if not os.path.isdir(batches[0][1]):
