@@ -232,6 +232,9 @@ OOM。完整实测记录（复现命令与数据）见 `design_doc/RUN_HISTORY.m
 | 开跑前 · 磁盘空间 | 剩余 < 200GB（每样本估算约需 75G）→ 中断批次 | P0 |
 | 开跑前 · md5 | 输入校验失败（数据损坏）→ 中断批次（v2.9.0 前仅剔除该样本） | P0 |
 | Step 0 · 合并失败 | cat 非 0（样本终止，其余照常） | P1 |
+| Step 1-6 间 · 磁盘复查 | Step 结束时剩余 < 200GB → 终止批次（RUN-34，开跑前检查的运行中补位） | P0 |
+| Step 1 · 上样量 | 样本 reads 绝对量 < 100 万 → 上样不足 | P1 |
+| Step 6 · 空交付 | per-sample PASS 裁决 VCF 0 条记录（交付结果为空） | P1 |
 | Step 1-6 · 执行失败 | 任一步 exit≠0 / 产物 0 字节（样本级隔离，不中断批次） | P1 |
 | Step 2 · QC 口径 | mapped <90%（报错不中断；v2.9.0 前判样本失败） | P1 |
 | Step 6 · 对照污染 | NTC 靶区深度 >10×（报错不中断；v2.9.0 前为 P0） | P1 |
@@ -242,6 +245,9 @@ OOM。完整实测记录（复现命令与数据）见 `design_doc/RUN_HISTORY.m
 | Step 5 · 对账·数量 | 矩阵行数 ≠ 靶区记录数（view -R 同口径对账，DEC-11） | P2 |
 | Step 5 · 对账·新鲜度 | 关键 VCF mtime < 本次启动（断点续跑复用旧产物） | P2 |
 | Step 6 · 捕获/覆盖/口径 | on-target <8% / mean depth <50× / 20X <95% / Ti/Tv <2.0 / call rate <95% | P2 |
+| Step 6 · 深度离散 | 批次内 mean depth 变异系数 CV >0.5（疑似混入异常样本） | P2 |
+| Step 1 · NTC reads | NTC reads 占批次中位样本 >1%（污染维度之二，与深度互补） | P2 |
+| Step 4 · 校准可信 | BQSR recal M 事件观测数 <10 万（known-sites 覆盖异常，校准不可信） | P2 |
 
 
 ## 7. 质检口径（自动判定，与笔记一致）

@@ -9,7 +9,7 @@ from pathlib import Path
 
 # ── 流程版本（与 design_doc/DESIGN.md design-meta version 同步，
 #    check_design.py 校验两处一致；写进 run_summary 与交付 README） ──────
-PIPELINE_VERSION = "2.9.0"
+PIPELINE_VERSION = "2.10.0"
 
 # ── 工作区 ──────────────────────────────────────────────────────────────
 PIPELINE_DIR = Path(__file__).resolve().parent          # $WORK/pipeline
@@ -135,6 +135,14 @@ PCT_20X_P1 = 95.0               # Step6: ≥20x 靶比例 <95% → P2
 TITV_P1 = 2.0                   # Step6: Ti/Tv <2.0 → P2（结论口径）
 CALL_RATE_P1 = 95.0             # Step6: call rate <95% → P2（非 ./. 基因型比例）
 NTC_DEPTH_P0 = 10.0             # Step6: NTC 靶区深度 >10× → P1（污染，报错不中断）
+READS_MIN = int(os.environ.get("GWAS_READS_MIN", "1000000"))
+                                # Step1: 样本 reads 绝对量 <1M → P1（上样不足）
+NTC_READS_PCT_P2 = float(os.environ.get("GWAS_NTC_READS_PCT_P2", "1.0"))
+                                # Step1: NTC reads 占批次中位样本 % >1% → P2（污染维度之二）
+DEPTH_CV_P2 = float(os.environ.get("GWAS_DEPTH_CV_P2", "0.5"))
+                                # Step6: 批次内 mean depth 变异系数 CV >0.5 → P2（混入异常样本）
+RECAL_OBS_MIN_P2 = float(os.environ.get("GWAS_RECAL_OBS_MIN_P2", "100000"))
+                                # Step4: recal M 事件观测数 <1e5 → P2（known-sites 覆盖崩坏，校准不可信）
 
 # ── 钉钉机器人（地址等环境参数只来自 pipeline/.env 或进程环境变量，禁止硬编码） ──
 DINGTALK_WEBHOOK = os.environ.get("DINGTALK_WEBHOOK", "")   # 未配置 → 通知静默跳过

@@ -266,5 +266,41 @@ class TestBcftoolsMosdepth(unittest.TestCase):
         self.assertIsNone(mmos.region_depth(regions, "chr1", 350))
 
 
+class TestRecalObservations(unittest.TestCase):
+    """RecalTable1 M 事件观测数解析（RUN-34）：按表头名取列、只加 M 行、
+    下一 # 表即止；known-sites 覆盖崩坏时该值骤降 → P2 信号"""
+
+    FIXTURE = (
+        "#:GATKReport.v1.1:5\n"
+        "#:GATKTable:2:17:%s:%s:;\n"
+        "#:GATKTable:Arguments:...\n"
+        "covariate  ReadGroupCovariate\n"
+        "#:GATKTable:6:3:%s:%s:%.4g:%.4g:%.4g:%.4g:;\n"
+        "#:GATKTable:RecalTable1:\n"
+        "ReadGroup  QualityScore  EventType  EmpiricalQuality  Observations  Errors\n"
+        "NA12878  14  M  13.0000  45782114  2230327.00\n"
+        "NA12878  14  I   9.0000       1234       45.00\n"
+        "NA12878  21  M  21.0000   6627250    52626.00\n"
+        "#:GATKTable:RecalTable2:\n"
+        "ReadGroup  QualityScore  EventType  Observations\n"
+        "NA12878  40  M  999999999\n")   # 后续表不得计入
+
+    def test_sums_m_event_observations(self):
+        from modules import gatk as mg
+        import tempfile
+        with tempfile.NamedTemporaryFile("w", suffix=".table", delete=False) as f:
+            f.write(self.FIXTURE)
+            path = f.name
+        try:
+            self.assertEqual(mg.parse_recal_observations(path),
+                             45782114 + 6627250)
+        finally:
+            os.unlink(path)
+
+    def test_missing_file_returns_none(self):
+        from modules import gatk as mg
+        self.assertIsNone(mg.parse_recal_observations("/nonexistent/x.table"))
+
+
 if __name__ == "__main__":
     unittest.main()

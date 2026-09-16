@@ -126,6 +126,30 @@ class BatchCtx:
             return Logger(None, prefix=sm)
         return self.factory.get(sm, os.path.join(self.work, "logs"))
 
+    def disk_guard(self, after_step):
+        """P0 运行中磁盘复查（RUN-34）：Step 间检查剩余磁盘，低于阈值立即终止
+        批次——长批次开跑前只查一次，中途磁盘满仅以"产物缺失"WARN 收场为时已晚；
+        dry-run 零落盘不检查"""
+        if self.runner.dry_run:
+            return
+        free_gb = shutil.disk_usage(
+            self.work if os.path.isdir(self.work) else config.RESULTS_ROOT).free / 1e9
+        if free_gb < config.DISK_MIN_FREE_GB:
+            raise RuntimeError(
+                f"运行中磁盘复查 P0（{after_step} 后）：剩余 {free_gb:.0f}GB < "
+                f"{config.DISK_MIN_FREE_GB}GB，终止批次（防写入中途磁盘满）")
+
+    def _ntc_reads_anoms(self):
+        """NTC reads 占批次中位样本比例异常 → P2（污染维度之二，RUN-34）"""
+        reads_m = self.metrics.get("reads") or {}
+        calling_reads = sorted(v for sm, v in reads_m.items()
+                               if sm not in self.excluded and isinstance(v, (int, float)))
+        med = calling_reads[len(calling_reads) // 2] if calling_reads else None
+        anoms = []
+        for sm in sorted(self.excluded & set(reads_m)):
+            anoms += alerts.check_ntc_reads(reads_m[sm], med)
+        return anoms
+
     def step_time(self, name):
         """记录步骤耗时（self._t0 由各 step 方法起始处设置）"""
         self.bdata["steps"][name] = {"duration_s": round(time.time() - self._t0, 1)}
@@ -321,6 +345,7 @@ class BatchCtx:
                 if ok:
                     met = note or {}
                     self.metrics.setdefault("fastp_retention", {})[sm] = met.get("retention_pct")
+                    self.metrics.setdefault("reads", {})[sm] = met.get("after_reads")
                     # Q30 百分数口径（parse_json 已换算）；整体优先，回退 R1/R2 均值
                     q30 = met.get("q30_pct")
                     if q30 is None and met.get("q30_pct_r1") is not None:
@@ -343,7 +368,9 @@ class BatchCtx:
                              f"Q30 {_avg(self.metrics.get('q30_pct'))}%",
                      anomalies=_step_anoms(self, "step1")
                                + alerts.check_fastp(self.metrics.get("fastp_retention"),
-                                                    self.metrics.get("q30_pct")),
+                                                    self.metrics.get("q30_pct"))
+                               + alerts.check_reads_low(self.metrics.get("reads"))
+                               + self._ntc_reads_anoms(),
                      artifacts=f"fastq_clean/*_R*.fastq.gz "
                                + alerts.artifact_summary(os.path.join(self.work, "fastq_clean", "*_R*.fastq.gz")),
                      log_hint=f"tail -f {self.work}/logs/sample_<样本>.self.log")
@@ -505,6 +532,16 @@ class BatchCtx:
                     self.log.error(f"{sm}: {note}")
             else:
                 self.failed[sm] = f"step4 异常: {r}"
+        # BQSR 校准可信度（RUN-34）：RecalTable1 M 事件观测数——known-sites
+        # 覆盖崩坏时骤降 → P2（报错不中断）
+        if not self.runner.dry_run:
+            for sm in self.merged:
+                if sm in self.failed:
+                    continue
+                obs = mgatk.parse_recal_observations(
+                    os.path.join(self.work, "bam", sm, f"{sm}.recal.table"))
+                if obs is not None:
+                    self.metrics.setdefault("recal_obs", {})[sm] = int(obs)
         self.step_time("step4")
         n_bqsr_ok = len([sm for sm in self.merged if sm not in self.failed])
         self.log.result(f"Step 4 完成: 成功 {n_bqsr_ok}/{len(self.merged)}")
@@ -512,7 +549,8 @@ class BatchCtx:
                      samples=f"{n_bqsr_ok}/{len(self.merged)} 成功",
                      metrics="markdup↔BQSR flagstat 逐行一致断言 "
                              f"{n_bqsr_ok}/{n_bqsr_ok} 通过",
-                     anomalies=_step_anoms(self, "step4"),
+                     anomalies=_step_anoms(self, "step4")
+                               + alerts.check_recal_low(self.metrics.get("recal_obs")),
                      artifacts=f"bam/*/*.markdup.BQSR.bam "
                                + alerts.artifact_summary(os.path.join(self.work, "bam", "*", "*.markdup.BQSR.bam")),
                      log_hint=f"tail -f {self.work}/logs/sample_<样本>.self.log")
@@ -816,6 +854,12 @@ class BatchCtx:
                         adj_vcfs[sm] = out_vcf
             self.bdata["artifacts"]["per_sample_adjudicated_dir"] = \
                 os.path.join(self.work, "per_sample_vcf")
+            # per-sample PASS 裁决 VCF 空结果检查（RUN-34）：交付为空 → P1
+            for sm, v in adj_vcfs.items():
+                nrec = mbc.count_records(self.runner, v)
+                self.metrics.setdefault("pass_records", {})[sm] = nrec
+                if nrec == 0:
+                    self.log.error(f"{sm} PASS 裁决 VCF 0 条记录（交付结果为空）")
             self.bdata["_adj_vcfs"] = adj_vcfs
         elif self.runner.dry_run:
             self.log.info("[DRY-RUN] 跳过裁决与每样本 VCF 重建的实际计算")
@@ -865,7 +909,12 @@ class BatchCtx:
                                    self.metrics.get("on_target_pct"))
                                + alerts.check_variantqc(
                                    self.cohort_stats.get("PASS", {}).get("titv"), call_rate)
-                               + alerts.check_ntc(ntc_depth),
+                               + alerts.check_ntc(ntc_depth)
+                               + [(f"P1", f"{sm} PASS 裁决 VCF 0 条记录（交付结果为空）")
+                                  for sm, v in sorted((self.metrics.get("pass_records") or {}).items())
+                                  if v == 0]
+                               + alerts.check_depth_cv(
+                                   self.metrics.get("mean_target_coverage")),
                      artifacts=f"MultiQC + 裁决VCF "
                                + alerts.artifact_summary(os.path.join(
                                    self.work, "per_sample_vcf", "*.PASS.adjudicated.vcf.gz")),
@@ -895,18 +944,12 @@ def process_batch(batch, batch_dir, args, plan, main_logger, run_date=""):
         early = ctx.step0_scan()          # 无有效样本 → 返回 bdata（批次 skipped）
         if early is not None:
             return early
-        if args.step >= 1:
-            ctx.step1_qc_trim()
-        if args.step >= 2:
-            ctx.step2_align()
-        if args.step >= 3:
-            ctx.step3_markdup()
-        if args.step >= 4:
-            ctx.step4_bqsr()
-        if args.step >= 5:
-            ctx.step5_variant_calling()
-        if args.step >= 6:
-            ctx.step6_summary_delivery()
+        for upto, step_fn in ((1, ctx.step1_qc_trim), (2, ctx.step2_align),
+                              (3, ctx.step3_markdup), (4, ctx.step4_bqsr),
+                              (5, ctx.step5_variant_calling), (6, ctx.step6_summary_delivery)):
+            if args.step >= upto:
+                step_fn()
+                ctx.disk_guard(f"step{upto}")   # P0 Step 间磁盘复查（RUN-34）
 
         # ── 汇总 ──
         merged, cohort_stats = ctx.merged, ctx.cohort_stats

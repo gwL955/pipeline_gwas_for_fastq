@@ -75,6 +75,39 @@ class TestChecks(unittest.TestCase):
         self.assertEqual(alerts.check_ntc(None), [])
 
 
+class TestNewChecks(unittest.TestCase):
+    """RUN-34 新增检查：P1 reads 不足/空 PASS VCF；P2 NTC reads、深度 CV、recal 观测"""
+
+    def test_reads_low_p1(self):
+        a = alerts.check_reads_low({"A": 500000, "B": 5000000})
+        self.assertEqual(len(a), 1)
+        self.assertEqual(a[0][0], "P1")
+        self.assertIn("A", a[0][1])
+        self.assertEqual(alerts.check_reads_low({"A": 5000000}), [])
+        self.assertEqual(alerts.check_reads_low({}), [])
+
+    def test_ntc_reads_p2(self):
+        self.assertEqual(alerts.check_ntc_reads(1000, 1000000), [])   # 0.1% 正常
+        a = alerts.check_ntc_reads(50000, 1000000)                    # 5% 异常
+        self.assertEqual(a[0][0], "P2")
+        self.assertIn("污染", a[0][1])
+        self.assertEqual(alerts.check_ntc_reads(None, 1000), [])
+        self.assertEqual(alerts.check_ntc_reads(50000, 0), [])        # 中位数无效
+
+    def test_depth_cv_p2(self):
+        self.assertEqual(alerts.check_depth_cv({"A": 100.0, "B": 102.0}), [])  # 均匀
+        a = alerts.check_depth_cv({"A": 50.0, "B": 300.0})            # CV≈0.71
+        self.assertEqual(a[0][0], "P2")
+        self.assertIn("CV", a[0][1])
+        self.assertEqual(alerts.check_depth_cv({"A": 100.0}), [])     # 单样本不判
+
+    def test_recal_low_p2(self):
+        a = alerts.check_recal_low({"A": 12345.0, "B": 45782114.0})
+        self.assertEqual(len(a), 1)
+        self.assertEqual(a[0][0], "P2")
+        self.assertIn("校准不可信", a[0][1])
+        self.assertEqual(alerts.check_recal_low({"B": 45782114.0}), [])
+
 class TestMilestone(unittest.TestCase):
 
     def test_template_fields(self):

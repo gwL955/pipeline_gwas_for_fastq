@@ -250,3 +250,32 @@ def qc_hsmetrics(hs, logger, control=False):
         f"on-bait={hs.get('ON_BAIT_PCT')}% on-target={hs.get('ON_TARGET_PCT')}% "
         f"PCT_SELECTED={hs.get('PCT_SELECTED_BASES')}（含±250bp 邻域口径，非捕获效率）")
     return True
+
+
+def parse_recal_observations(table_path):
+    """RecalTable1 中 EventType=M 行的 Observations 求和——BQSR 校准可信度信号
+    （known-sites 覆盖崩坏时观测数骤降，RUN-34）。文件缺失/无有效行返回 None"""
+    try:
+        with open(table_path, encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return None
+    hdr, start = None, None
+    for i, ln in enumerate(lines):
+        if ln.startswith("#:GATKTable:RecalTable1:"):
+            hdr, start = lines[i + 1].split(), i + 2
+            break
+    if not hdr or "Observations" not in hdr or "EventType" not in hdr:
+        return None
+    oi, ei = hdr.index("Observations"), hdr.index("EventType")
+    total = 0.0
+    for ln in lines[start:]:
+        if ln.startswith("#"):
+            break                      # 下一表开始
+        p = ln.split()
+        if len(p) > max(oi, ei) and p[ei] == "M":
+            try:
+                total += float(p[oi])
+            except ValueError:
+                pass
+    return total or None

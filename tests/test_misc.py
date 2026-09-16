@@ -371,6 +371,28 @@ class TestExportDelivery(unittest.TestCase):
             self.assertEqual(mtq1, mtq2)    # 附加文件（MultiQC）同样幂等
 
 
+class TestDiskGuard(unittest.TestCase):
+
+    def test_disk_guard_between_steps_p0(self):
+        """★ P0 Step 间磁盘复查锚（RUN-34）：低于阈值立即 RuntimeError 终止批次；
+        dry-run 零落盘跳过检查"""
+        import argparse
+        import shutil as _shutil
+        from run_pipeline import BatchCtx
+        with tempfile.TemporaryDirectory() as td:
+            args = argparse.Namespace(dry_run=True)
+            ctx = BatchCtx("B", td, os.path.join(td, "w"), args, None, None)
+            ctx.disk_guard("step0")            # dry-run：不检查不抛
+            ctx.runner.dry_run = False         # 切换为实跑语义再验阈值
+            with mock.patch.object(config, "DISK_MIN_FREE_GB", 1e9), \
+                    mock.patch("shutil.disk_usage",
+                               return_value=_shutil.disk_usage("/")):
+                with self.assertRaises(RuntimeError):   # 阈值 1e9GB 必低于真实剩余
+                    ctx.disk_guard("step1")
+            with mock.patch.object(config, "DISK_MIN_FREE_GB", 0):
+                ctx.disk_guard("step2")        # 阈值 0：正常放行
+
+
 class TestDeliveryIndex(unittest.TestCase):
 
     def test_index_accumulates_history(self):

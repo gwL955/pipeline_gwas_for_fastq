@@ -3,7 +3,7 @@
 ```yaml
 # ---- design-meta（机器可解析锚点，勿手改格式；版本规则见 §0）----
 doc: GWAS-pipeline-design
-version: 2.9.0
+version: 2.10.0
 updated: 2026-09-16
 owner_human: gewenlong
 owner_machine: ZCode(GLM)
@@ -115,6 +115,7 @@ $WORK/
 | DEC-16 | 容器运行时在 Runner 初始化时自解析为**绝对路径**（shutil.which → 标准目录探测），且子进程 PATH 兜底补齐标准系统目录——不依赖调用方 PATH 完整性 | 实测：从 PATH 受限环境（PATH=/usr/bin:/bin，IDE 面板/精简 env 类）启动曾致 `singularity: not found` exit=127（RUN-22）；singularity 实装于 /usr/local/bin/singularity |
 | DEC-17 | **流程只在宿主 Python 运行**：main() 启动卫兵检测 /.singularity.d 或 SINGULARITY_* 环境变量，容器内运行立即退出并指引用 /usr/bin/python3；本机 `python` 是容器别名（mamba 解释器），嵌套容器既看不到宿主 singularity、时区还是 UTC | RUN-22/23：alias python 嵌套运行全部 127；流程纯标准库无需 mamba/conda |
 | DEC-19 | **样本名白名单 P0 阻断**：含 `[A-Za-z0-9_.-]` 外字符的样本名 → P0 异常项入启动通知后 **直接中断该批次分析**（RuntimeError，批次 failed；多批次运行其余批次照常隔离执行）；dry-run 同样触发（提前暴露）。v2.7.0 曾为"判无效跳过继续"，v2.8.0 按用户指示收紧为阻断 | 样本名进入 shell 命令拼接与 bwa @RG 头，非常规字符属注入面（RUN-31 H1→RUN-32 收紧） |
+| DEC-22 | **审计项落地（RUN-33 清单）**：P0 运行中磁盘复查（Step 间 disk_guard，低于 DISK_MIN_FREE_GB 立即终止批次，dry-run 跳过）；P1 样本 reads 绝对量过低（TH-33）与 per-sample PASS 裁决 VCF 0 记录（count_records 实数）；P2 NTC reads 占比（TH-34，相对批次中位）、批次内深度 CV（TH-35）、BQSR recal 观测数（TH-36，RecalTable1 M 事件求和） | RUN-33 审计结论经用户逐项圈选实施（RUN-34） |
 | DEC-21 | **分级体系重构（三级）**：P0=阻断级——严重影响分析（样本名非法/依赖缺失/磁盘不足/md5 输入损坏）→ 统一 raise **中断批次**（退出码 1，多批次隔离不变）；P1=严重——执行失败（样本级隔离，不中断批次）、NTC 污染、mapped<90 QC 口径，报错不中断；P2=质量提示——原全部质量阈值（保留率/Q30/mapped<95/pp/dup/on-target/depth/20X/Ti/Tv/call rate）与对账数量/新鲜度，只记录。mapped<90 不再判样本失败（原会终止样本，属"质量问题中断"违例） | 用户 v2.9.0 决定：P0 应为严重影响分析的阻断级；质量只报错不中断；原 P0/P1 机械降级为 P1/P2（RUN-33） |
 | DEC-20 | **process_batch 步骤方法化**：Step 0-6 拆为 BatchCtx.step0_scan~step6_summary_delivery 七个方法，process_batch 仅编排（~40 行）；跨步骤状态挂 ctx（merged/excluded/cohort_stats/bdata 等）；MultiQC 时序锚随之锚定 step6 方法源码 | 原单函数 ~700 行难读难测；拆分后 95 用例全绿 + 真实批次 --step 0 冒烟验证（RUN-31，用户采纳 M3 建议） |
 | DEC-18 | **环境参数去硬编码，统一 .env**：钉钉 webhook（含 access_token）等环境参数只存 `pipeline/.env`（与代码同目录；模板 .env.example；`GWAS_ENV_FILE` 可改址），config.py 启动时解析并入（setdefault），三源优先级=进程环境变量 > .env > 内置默认；webhook 未配置→通知静默跳过（启动 WARN + 首次发送返回配置指引）；`singularity/` 镜像目录仍为 pipeline 同级目录约定，不走 .env | 用户要求（RUN-26）：密钥硬编码在代码里会随代码分发泄露且换环境必改源码；.env 权限 600 |
@@ -154,6 +155,10 @@ $WORK/
 | TH-30 | GATK_MEM_MAX_GB | 8 | GATK -Xmx 上限 g |
 | TH-31 | COHORT_MEM_MIN_GB | 8 | cohort -Xmx 下限 g |
 | TH-32 | COHORT_MEM_MAX_GB | 32 | cohort -Xmx 上限 g |
+| TH-33 | READS_MIN | 1000000 | 样本 reads 绝对量 <1M → P1（上样不足，RUN-34） |
+| TH-34 | NTC_READS_PCT_P2 | 1.0 | NTC reads 占批次中位样本 %>1% → P2（污染维度之二） |
+| TH-35 | DEPTH_CV_P2 | 0.5 | 批次内 mean depth 变异系数 CV>0.5 → P2（混入异常样本） |
+| TH-36 | RECAL_OBS_MIN_P2 | 100000 | BQSR recal M 事件观测数 <1e5 → P2（校准不可信） |
 
 > TH-17~20 编号已废弃不复用；TH-21 起编号保持不变以维持引用稳定。
 
@@ -216,6 +221,8 @@ $WORK/
 | 2.8.0 | 2026-09-16 | 机 | DEC-19 更新：bad_names 预检记 P0 异常项（随启动通知可见）后随 missing_deps 一同 raise RuntimeError 中断批次（批次 failed/退出码 1；多批次隔离不变；dry-run 同样触发）；移除 v2.7.0 的剔除继续逻辑；测试断言改为期望失败；顺带修复相对 --input 回落 $WORK 绕过 GWAS_RAW_DATA 覆盖的隐患（改按 RAW_DATA_DIR 语境解析+回归锚，RUN-32 验证事故暴露）；测试 95→96（RUN-32） |
 | 2.9.0 | 2026-09-16 | 人 | 分级体系修正：P0 收敛为严重影响分析并直接中断（如样本名非法）；其余原 P0/P1 降为 P1/P2；质量问题只报错不中断；并要求输出缺失/分级不当/推荐项审计清单 |
 | 2.9.0 | 2026-09-16 | 机 | DEC-21：P0=阻断级统一 raise（依赖/样本名/磁盘新增/md5 新增，中断批次退出码 1）；P1=执行失败隔离+NTC 污染+mapped<90（不再判样本失败，qc_judgement 改记录）；P2=全部质量阈值与对账（alerts 全量降级，LEVEL_ORDER 三级）；通知 tag 三级化；测试断言全量更新+磁盘阈值测试豁免；审计清单（缺失/建议项）随 RUN-33 交付（RUN-33） |
+| 2.10.0 | 2026-09-16 | 人 | 实施 RUN-33 审计项：P0 运行中磁盘复查；P1 reads 过低与空 PASS VCF；P2 NTC reads 占比/深度 CV/recal 观测数 |
+| 2.10.0 | 2026-09-16 | 机 | DEC-22：BatchCtx.disk_guard（Step 间复查，低阈值 raise）；check_reads_low/check_ntc_reads/check_depth_cv/check_recal_low 入 alerts；step1 采集 reads 并通知（NTC 相对批次中位）；step4 解析 RecalTable1 M 观测数（真实产物 5.8 亿验证）；step6 裁决 VCF count_records 空结果 P1；TH-33~36 入表并加 check_design 镜像集；测试 96→103（四检查/recal 解析/disk_guard 锚）；真实 --step 0 冒烟（RUN-34） |
 
 ## 9. 证据索引 <!-- MACHINE -->
 

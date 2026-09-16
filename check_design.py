@@ -60,7 +60,8 @@ def main():
                 "NTC_DEPTH_P0", "TITV_P1", "CALL_RATE_P1", "DISK_MIN_FREE_GB",
                 "DISK_PER_SAMPLE_GB", "BWA_INDEX_MEM_GB", "SORT_MEM_MIN", "SORT_MEM_MAX",
                 "GATK_MEM_MIN_GB", "GATK_MEM_MAX_GB", "COHORT_MEM_MIN_GB",
-                "COHORT_MEM_MAX_GB"}
+                "COHORT_MEM_MAX_GB", "READS_MIN", "NTC_READS_PCT_P2",
+                "DEPTH_CV_P2", "RECAL_OBS_MIN_P2"}
     documented = {key for _, key, _ in th_rows}
     for key in sorted(mirrored - documented):
         warnings.append(f"config.{key} 未在 DESIGN.md TH 表登记（若属新阈值请补 TH-xx 行")

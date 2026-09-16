@@ -117,6 +117,53 @@ def check_ntc(ntc_depth):
     return []
 
 
+def check_reads_low(reads):
+    """reads: {sm: after_reads}——绝对量过低 → P1（上样不足，报错不中断，RUN-34）"""
+    out = []
+    for sm, n in sorted((reads or {}).items()):
+        if isinstance(n, (int, float)) and n < config.READS_MIN:
+            out.append(("P1", f"{sm} reads {int(n)} < {config.READS_MIN}"
+                               f"（上样不足，结果可信度存疑）"))
+    return out
+
+
+def check_ntc_reads(ntc_reads, median_reads):
+    """NTC reads 占批次中位样本 reads 比例异常 → P2（污染维度之二，与深度互补）"""
+    if not isinstance(ntc_reads, (int, float)) or not isinstance(median_reads, (int, float)) \
+            or median_reads <= 0:
+        return []
+    pct = ntc_reads / median_reads * 100
+    if pct > config.NTC_READS_PCT_P2:
+        return [("P2", f"NTC reads 占批次中位样本 {pct:.2f}%"
+                       f"（阈值 {config.NTC_READS_PCT_P2}%）——阴性对照出现可观数据量，疑似污染")]
+    return []
+
+
+def check_depth_cv(mean_depth):
+    """批次内样本间 mean depth 变异系数 CV 过大 → P2（疑似混入异常样本）"""
+    vals = [v for v in (mean_depth or {}).values() if isinstance(v, (int, float))]
+    if len(vals) < 2:
+        return []
+    mean = sum(vals) / len(vals)
+    if mean <= 0:
+        return []
+    cv = (sum((v - mean) ** 2 for v in vals) / len(vals)) ** 0.5 / mean
+    if cv > config.DEPTH_CV_P2:
+        return [("P2", f"批次内 mean depth 离散度 CV={cv:.2f}（阈值 {config.DEPTH_CV_P2}，"
+                       f"深度 {min(vals):.1f}-{max(vals):.1f}×）——疑似混入异常样本")]
+    return []
+
+
+def check_recal_low(obs):
+    """recal: {sm: M 事件观测数}——known-sites 覆盖崩坏致校准不可信 → P2"""
+    out = []
+    for sm, n in sorted((obs or {}).items()):
+        if isinstance(n, (int, float)) and n < config.RECAL_OBS_MIN_P2:
+            out.append(("P2", f"{sm} BQSR recal 观测数 {int(n)} < {int(config.RECAL_OBS_MIN_P2)}"
+                              f"（known-sites 覆盖异常，校准不可信）"))
+    return out
+
+
 # ── 产物摘要 ────────────────────────────────────────────────────────────
 def artifact_summary(pattern, basedir=None):
     """glob 产物 → '×N  mtime …'（取最新 mtime）"""
