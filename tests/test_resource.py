@@ -17,20 +17,28 @@ import resource                                  # noqa: E402
 class TestSortMemFormat(unittest.TestCase):
     """★ 核心踩坑：sort -m 必须是 '128M'/'2048M' 这类整数+单位"""
 
+    def _plan(self, profile="auto", **kw):
+        """auto 档用真实内存推导：小内存机器（CI runner ~16G）会因单样本峰值
+        19.5G 触发快速失败 SystemExit（--max-memory 是上限压不高它）——统一
+        mock 探测为 32 线程/64G，测试只验证推导逻辑本身"""
+        with mock.patch.object(resource, "detect_cpu", return_value=32), \
+                mock.patch.object(resource, "detect_mem_gb", return_value=64.0):
+            return resource.plan(profile=profile, **kw)
+
     def test_sort_mem_integer_megabytes(self):
         for profile in ("auto", "low", "high"):
             with self.subTest(profile=profile):
-                p = resource.plan(profile=profile)
+                p = self._plan(profile=profile)
                 self.assertRegex(p.sort_mem, r"^\d+M$",
                                  f"{profile} 档 sort_mem={p.sort_mem} 含小数点/其他单位")
 
     def test_gatk_mem_format(self):
-        p = resource.plan()
+        p = self._plan()
         self.assertRegex(p.gatk_mem, r"^\d+g$")
         self.assertRegex(p.cohort_mem, r"^\d+g$")
 
     def test_plan_invariants(self):
-        p = resource.plan()
+        p = self._plan()
         self.assertGreaterEqual(p.workers, 1)
         self.assertGreaterEqual(p.threads, 4)
         self.assertIn(p.threads, (4, 8, 12, 24))       # 分档表
