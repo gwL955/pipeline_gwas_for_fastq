@@ -67,7 +67,8 @@ def concat(runner, vcfs, out_vcf, logger):
 
 def count_records(runner, vcf, logger=None):
     out = runner.out(
-        f"{_bc(runner, f'view -H {runner.cpath(vcf)}')} | wc -l", logger=logger)
+        f"{_bc(runner, f'view -H {runner.cpath(vcf)}')} | wc -l", logger=logger,
+        timeout=config.STATS_TIMEOUT_S)
     try:
         return int(out.strip().split()[-1])
     except (ValueError, IndexError):
@@ -125,14 +126,14 @@ def query_lines(runner, vcf, fmt, logger=None):
     """bcftools query -f <fmt>，返回行列表（内存中比对用）"""
     out = runner.out(
         _bc(runner, "query -f " + shlex.quote(fmt) + " " + runner.cpath(vcf)),
-        logger=logger)
+        logger=logger, timeout=config.STATS_TIMEOUT_S)
     return [l for l in out.splitlines() if l]
 
 
 # ── stats 解析 ──
 def run_stats(runner, vcf, out_host, logger):
     rc = runner.run(f"{_bc(runner, f'stats {runner.cpath(vcf)}')} > {out_host}",
-                    logger=logger, outputs=[out_host])
+                    logger=logger, outputs=[out_host], timeout=config.STATS_TIMEOUT_S)
     return rc == 0
 
 

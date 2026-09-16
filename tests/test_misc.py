@@ -139,6 +139,42 @@ class TestLoggerTee(unittest.TestCase):
             self.assertFalse(os.path.exists(res),
                              "dry-run 不得在 results/ 落任何目录/文件")
 
+    def test_bad_sample_name_rejected(self):
+        """★ 样本名白名单锚（DEC-19/RUN-31）：非常规字符（如 ;）判无效跳过——
+        样本名进入 shell 命令拼接与 bwa @RG 头，此前仅 P1 告警照常处理属注入面"""
+        import subprocess
+        with tempfile.TemporaryDirectory() as td:
+            bdir = os.path.join(td, "in", "B")
+            os.makedirs(bdir)
+            for sm in ("bad;name_S1", "NA12878_S2"):
+                for r in ("R1", "R2"):
+                    with open(os.path.join(
+                            bdir, f"{sm}_L001_{r}_001.fastq.gz"), "wb") as f:
+                        f.write(b"@x\nACGT\n+\nIIII\n")
+            env = {**os.environ, **_dep_env(td),
+                   "GWAS_RESULTS": os.path.join(td, "results")}
+            r = subprocess.run(
+                [sys.executable,
+                 os.path.join(os.path.dirname(os.path.dirname(
+                     os.path.abspath(__file__))), "run_pipeline.py"),
+                 "--dry-run", "--resource-profile", "low",
+                 "--input", os.path.join(td, "in")],
+                env=env, capture_output=True, text=True, timeout=90)
+            self.assertEqual(r.returncode, 0, r.stdout[-500:])
+            self.assertIn("判无效跳过", r.stdout)          # 非法名被剔除
+            self.assertIn("有效样本 1 个", r.stdout)        # 合法样本照常处理
+
+    def test_cli_version_flag(self):
+        """--version：输出版本并退出码 0（与 DESIGN.md 同步，check_design 校验）"""
+        import subprocess
+        r = subprocess.run(
+            [sys.executable,
+             os.path.join(os.path.dirname(os.path.dirname(
+                 os.path.abspath(__file__))), "run_pipeline.py"),
+             "--version"], capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0)
+        self.assertIn(config.PIPELINE_VERSION, r.stdout)
+
     def test_console_only_logger_no_file(self):
         lg = Logger(None, prefix="X")
         lg.info("不落盘")          # 不应抛异常
@@ -189,8 +225,9 @@ class TestDirNaming(unittest.TestCase):
         或进不了交付目录）"""
         import inspect
         import run_pipeline
-        src = inspect.getsource(run_pipeline.process_batch)
-        i_rebuild = src.index('bdata["_adj_vcfs"] = adj_vcfs')
+        # v2.7.0 起步骤实现拆分为 BatchCtx 方法，锚定 step6 方法源码
+        src = inspect.getsource(run_pipeline.BatchCtx.step6_summary_delivery)
+        i_rebuild = src.index('self.bdata["_adj_vcfs"] = adj_vcfs')
         i_multiqc = src.index("run_multiqc")
         i_export = src.index("export_delivery(")
         self.assertLess(i_rebuild, i_multiqc,
@@ -274,6 +311,7 @@ class TestExportDelivery(unittest.TestCase):
             self.assertIn("multiqc", man)          # 附加文件登记（sample 列=multiqc）
             rdm = open(os.path.join(out, "README.md")).read()
             self.assertIn("DP≥" + str(config.DP_MIN), rdm)
+            self.assertIn(f"v{config.PIPELINE_VERSION}", rdm)   # 溯源：交付物带版本
             self.assertIn("MultiQC 汇总报告", rdm)  # 交付说明含 MultiQC 行
 
     def test_export_delivery_without_extra_files(self):

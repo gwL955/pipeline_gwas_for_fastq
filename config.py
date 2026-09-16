@@ -7,6 +7,10 @@
 import os
 from pathlib import Path
 
+# ── 流程版本（与 design_doc/DESIGN.md design-meta version 同步，
+#    check_design.py 校验两处一致；写进 run_summary 与交付 README） ──────
+PIPELINE_VERSION = "2.7.0"
+
 # ── 工作区 ──────────────────────────────────────────────────────────────
 PIPELINE_DIR = Path(__file__).resolve().parent          # $WORK/pipeline
 WORK_DIR = str(PIPELINE_DIR.parent)                     # $WORK（--bind 挂载根）
@@ -85,6 +89,9 @@ FASTP_LENGTH_REQUIRED = 36
 HC_INTERVAL_PADDING = 100
 PLOIDY = 2
 BWA_K = 100000000
+# 统计类命令统一超时（flagstat/stats/count_records/view|wc/query 等秒级查询）：
+# 挂死不再无限阻塞批次；GATK/bwa 等长任务不设超时（None）
+STATS_TIMEOUT_S = 600
 
 # 硬过滤阈值（GATK best practices，样本量约 30，不用 VQSR）——与笔记 4-13/4-14 逐字一致
 SNP_HARD_FILTERS = [

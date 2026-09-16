@@ -147,7 +147,7 @@ class Runner:
             if timer is not None:
                 timer.cancel()
 
-    def out(self, cmd, logger=None):
-        """执行并仅返回 stdout（一次性统计查询用）"""
-        rc, o, _ = self.run(cmd, logger=logger, capture=True)
+    def out(self, cmd, logger=None, timeout=None):
+        """执行并仅返回 stdout（一次性统计查询用；timeout 同 run）"""
+        rc, o, _ = self.run(cmd, logger=logger, capture=True, timeout=timeout)
         return o if rc == 0 else ""

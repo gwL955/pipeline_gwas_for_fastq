@@ -4,6 +4,7 @@
 运行与解析（三套统计）。对应笔记《2-比对》代码块 5/7/14/16。"""
 
 import re
+import config
 
 # 去重前 flagstat 的 duplicates 行无意义，不采集（提示词硬性要求）
 FLAG_IGNORE_KEYS = ("duplicates", "primary duplicates")
@@ -19,14 +20,14 @@ def run_index(runner, bam_host, logger):
 def run_flagstat(runner, bam_host, out_host, logger):
     rc = runner.run(
         f"{runner.tool('samtools', f'samtools flagstat {runner.cpath(bam_host)}')} > {out_host}",
-        logger=logger, outputs=[out_host])
+        logger=logger, outputs=[out_host], timeout=config.STATS_TIMEOUT_S)
     return rc == 0
 
 
 def run_stats(runner, bam_host, out_host, logger):
     rc = runner.run(
         f"{runner.tool('samtools', f'samtools stats {runner.cpath(bam_host)}')} > {out_host}",
-        logger=logger, outputs=[out_host])
+        logger=logger, outputs=[out_host], timeout=config.STATS_TIMEOUT_S)
     return rc == 0
 
 

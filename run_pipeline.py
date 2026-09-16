@@ -62,6 +62,9 @@ def parse_args():
     p.add_argument("--dry-run", action="store_true", help="打印命令与资源计划，不执行")
     p.add_argument("--notify", default="on", choices=["on", "off"], help="钉钉通知开关")
     p.add_argument("--notify-test", action="store_true", help="发送测试通知后退出")
+    p.add_argument("--version", action="version",
+                   version=f"%(prog)s {config.PIPELINE_VERSION}",
+                   help="显示流程版本后退出")
     p.add_argument("--out", help="覆盖批次结果目录（默认 results/<批次>_<执行日期>）")
     return p.parse_args()
 
@@ -109,11 +112,23 @@ class BatchCtx:
         self.failed = {}           # sm → 失败步骤
         self.metrics = {}
         self.started = time.time()
+        # 跨步骤状态（v2.7.0 拆分后由各 step 方法读写）
+        self.bdata = None            # 批次结果 dict（process_batch 挂载）
+        self.notify_on = False
+        self.run_date = ""
+        self.merged = {}             # Step0 合并成功样本 → (r1, r2)
+        self.excluded = set()        # 联合检测排除的对照样本
+        self.cohort_stats = {}       # Step5 cohort 级统计
+        self._t0 = 0.0               # 当前步骤起始时间
 
     def slog(self, sm):
         if self.dry_run:
             return Logger(None, prefix=sm)
         return self.factory.get(sm, os.path.join(self.work, "logs"))
+
+    def step_time(self, name):
+        """记录步骤耗时（self._t0 由各 step 方法起始处设置）"""
+        self.bdata["steps"][name] = {"duration_s": round(time.time() - self._t0, 1)}
 
     def makedirs(self):
         w = self.work
@@ -128,58 +143,50 @@ class BatchCtx:
             os.makedirs(os.path.join(w, d), exist_ok=True)
 
 
-def process_batch(batch, batch_dir, args, plan, main_logger, run_date=""):
-    """单批次全流程。返回批次结果 dict（status: success/failed/skipped）。
-    输出目录 results/<批次>_<执行日期>/（多次运行隔离；同日重跑同目录幂等续跑）"""
-    work = args.out if args.out else config.batch_result_dir(batch, run_date)
-    ctx = BatchCtx(batch, batch_dir, work, args, plan, main_logger)
-    log = ctx.log
-    bdata = {"status": "skipped", "batch_dir": batch_dir, "work_dir": work,
-             "samples": {"valid": [], "invalid": {}, "calling": []},
-             "steps": {}, "metrics": {}, "artifacts": {},
-             "error": None}
-    notify_on = args.notify == "on" and not args.dry_run
-
-    def step_time(name):
-        bdata["steps"][name] = {"duration_s": round(time.time() - t0, 1)}
-
-    try:
-        log.step(f"═══ 批次 {batch} 启动（{batch_dir} → {work}）═══")
-        ctx.makedirs()
-
-        # ── Step 0：样本清点 + md5 + Lane 合并 + samples.tsv ──
-        t0 = time.time()
-        valid, invalid = scanner.scan_batch(batch_dir)
-        if args.samples:
-            keep = {s.strip() for s in args.samples.split(",") if s.strip()}
+    # ── step0_scan ──
+    def step0_scan(self):
+        """Step 0：清点/样本名白名单（DEC-19）/md5/磁盘与依赖预检/Lane 合并/samples.tsv。
+        无有效样本时返回 bdata（批次 skipped），正常返回 None。"""
+        self._t0 = time.time()
+        valid, invalid = scanner.scan_batch(self.batch_dir)
+        if self.args.samples:
+            keep = {s.strip() for s in self.args.samples.split(",") if s.strip()}
             for sm in list(valid):
                 if sm not in keep:
                     invalid[sm] = "未在 --samples 白名单"
                     del valid[sm]
-        bdata["samples"]["valid"] = sorted(valid)
-        bdata["samples"]["invalid"] = invalid
+        # 样本名白名单不匹配 → 判无效跳过（DEC-19：样本名会进入 shell 命令拼接
+        # 与 bwa @RG 头，非常规字符属注入面；与 R1/R2 不匹配同级处置，
+        # 置于"无有效样本"早退之前——全部无效时批次跳过而非失败）
+        bad_names = [sm for sm in valid if not re.fullmatch(r"[A-Za-z0-9_.\-]+", sm)]
+        for sm in bad_names:
+            self.log.error(f"样本名含非常规字符（须 A-Za-z0-9_.-），样本 {sm} 判无效跳过")
+            invalid[sm] = "样本名含非常规字符（判无效）"
+            valid.pop(sm, None)
+        self.bdata["samples"]["valid"] = sorted(valid)
+        self.bdata["samples"]["invalid"] = invalid
         if not valid:
-            log.warn(f"批次 {batch} 无任何有效样本，跳过该批次（退出码仍为 0）")
-            if notify_on:
+            self.log.warn(f"批次 {self.batch} 无任何有效样本，跳过该批次（退出码仍为 0）")
+            if self.notify_on:
                 reasons = "".join(f"\n\n- **{k}**：{v}" for k, v in invalid.items())
-                dingtalk.notify(f"批次 {batch} 跳过",
-                                f"#### 批次 {batch} 跳过（无有效样本）"
+                dingtalk.notify(f"批次 {self.batch} 跳过",
+                                f"#### 批次 {self.batch} 跳过（无有效样本）"
                                 f"\n\n> 无效样本清单如下，退出码保持 0{reasons}",
-                                logger=log)
-            step_time("step0")
-            return bdata
+                                logger=self.log)
+            self.step_time("step0")
+            return self.bdata
         for sm, reason in invalid.items():
-            log.warn(f"无效样本（跳过）: {sm} —— {reason}")
+            self.log.warn(f"无效样本（跳过）: {sm} —— {reason}")
 
         input_bytes = sum(os.path.getsize(f) for si in valid.values()
                           for f in si.r1 + si.r2)
         lanes_expected = sum(len(si.r1) for si in valid.values())
         n_initial = len(valid)
-        log.info(f"有效样本 {n_initial} 个，输入体量 {_fmt_gb(input_bytes)}")
+        self.log.info(f"有效样本 {n_initial} 个，输入体量 {_fmt_gb(input_bytes)}")
 
         # ── 开跑前检查（磁盘 / 依赖文件 / 样本名规范）──
         pre_anoms = []
-        disk_path = work if os.path.isdir(work) else config.RESULTS_ROOT
+        disk_path = self.work if os.path.isdir(self.work) else config.RESULTS_ROOT
         if not os.path.isdir(disk_path):   # dry-run 零落盘不建目录：沿祖先取存在的路径
             disk_path = os.path.dirname(os.path.abspath(disk_path))
             while disk_path and not os.path.isdir(disk_path):
@@ -196,28 +203,28 @@ def process_batch(batch, batch_dir, args, plan, main_logger, run_date=""):
         if missing_deps:
             pre_anoms.append(("P0", "依赖文件缺失或 0 字节: "
                               + ", ".join(os.path.basename(p) for p in missing_deps)))
-        bad_names = [sm for sm in valid if not re.fullmatch(r"[A-Za-z0-9_.\-]+", sm)]
-        if bad_names:
-            pre_anoms.append(("P1", f"样本名含非常规字符（建议 A-Za-z0-9_.-）: {bad_names}"))
+        bad_names_anom = ([("P1", f"{len(bad_names)} 个样本名非常规字符已判无效: "
+                                  + ", ".join(sorted(bad_names)))] if bad_names else [])
+        pre_anoms += bad_names_anom
         for lv, msg in pre_anoms:
-            (log.error if lv == "P0" else log.warn)(f"[开跑前-{lv}] {msg}")
+            (self.log.error if lv == "P0" else self.log.warn)(f"[开跑前-{lv}] {msg}")
 
         # md5 完整性校验（并行）；失败样本终止分析并进入通知
         md5_failed = set()
-        if not args.dry_run:
-            md5_failed, _ = scanner.verify_md5(batch_dir, log, workers=plan.workers)
+        if not self.args.dry_run:
+            md5_failed, _ = scanner.verify_md5(self.batch_dir, self.log, workers=self.plan.workers)
             for sm in md5_failed & set(valid):
-                log.error(f"md5 校验失败，样本 {sm} 终止分析")
+                self.log.error(f"md5 校验失败，样本 {sm} 终止分析")
                 invalid[sm] = "md5 校验失败"
         for sm in md5_failed:
             valid.pop(sm, None)
-        bdata["samples"]["valid"] = sorted(valid)
+        self.bdata["samples"]["valid"] = sorted(valid)
 
         # 启动通知（样本数/输入体量/资源计划 + 开跑前检查结论）
-        if notify_on:
-            p = plan
+        if self.notify_on:
+            p = self.plan
             lvl = alerts.worst_level(pre_anoms)
-            body = (f"#### [GWAS][{lvl}] {batch}批次 · 启动"
+            body = (f"#### [GWAS][{lvl}] {self.batch}批次 · 启动"
                     f"\n\n样本: {len(valid)}/{n_initial} 有效｜输入 {_fmt_gb(input_bytes)}｜"
                     f"{datetime.now().strftime('%m-%d %H:%M')}"
                     f"\n\n指标: 探测 {p.cpu_detected} 线程 / {p.mem_detected} GB｜"
@@ -229,619 +236,673 @@ def process_batch(batch, batch_dir, args, plan, main_logger, run_date=""):
                 body += f"\n\n异常: [{lv}] {msg}" + (" ← 需确认" if lv == "P1" else " ← 阻断级")
             if not pre_anoms:
                 body += "\n\n异常: 无"
-            body += f"\n\n产物: {work}"
-            dingtalk.notify(f"[GWAS][{lvl}] {batch}批次 · 启动", body, logger=log)
+            body += f"\n\n产物: {self.work}"
+            dingtalk.notify(f"[GWAS][{lvl}] {self.batch}批次 · 启动", body, logger=self.log)
         if missing_deps:
             raise RuntimeError(f"开跑前检查 P0：依赖文件缺失 → {'; '.join(missing_deps)}")
 
-        merged, merge_failed = scanner.merge_all(
-            valid, os.path.join(work, "fastq_merged"), ctx.runner,
-            ctx.slog, plan.workers)
+        self.merged, merge_failed = scanner.merge_all(
+            valid, os.path.join(self.work, "fastq_merged"), self.runner,
+            self.slog, self.plan.workers)
         for sm, reason in merge_failed.items():
             invalid[sm] = reason
             valid.pop(sm, None)
-            bdata["samples"]["invalid"][sm] = reason
-        if not merged:
-            raise RuntimeError(f"批次 {batch} 全部样本 Lane 合并失败")
-        if not args.dry_run:
-            scanner.write_samples_tsv(os.path.join(work, "samples.tsv"), merged, valid)
-            bdata["artifacts"]["samples_tsv"] = os.path.join(work, "samples.tsv")
-        bdata["samples"]["valid"] = sorted(merged)
-        log.result(f"Step 0 完成: {len(merged)} 样本合并就绪，samples.tsv 已生成")
-        lanes_merged = sum(len(si.r1) for sm, si in valid.items() if sm in merged)
-        step_time("step0")
-        _step_notify(notify_on, batch, 0, "清点与Lane合并", log,
-                     samples=f"{len(merged)}/{n_initial} 成功 | Lane 合并 {lanes_merged}/{lanes_expected}",
+            self.bdata["samples"]["invalid"][sm] = reason
+        if not self.merged:
+            raise RuntimeError(f"批次 {self.batch} 全部样本 Lane 合并失败")
+        if not self.args.dry_run:
+            scanner.write_samples_tsv(os.path.join(self.work, "samples.tsv"), self.merged, valid)
+            self.bdata["artifacts"]["samples_tsv"] = os.path.join(self.work, "samples.tsv")
+        self.bdata["samples"]["valid"] = sorted(self.merged)
+        self.log.result(f"Step 0 完成: {len(self.merged)} 样本合并就绪，samples.tsv 已生成")
+        lanes_merged = sum(len(si.r1) for sm, si in valid.items() if sm in self.merged)
+        self.step_time("step0")
+        _step_notify(self.notify_on, self.batch, 0, "清点与Lane合并", self.log,
+                     samples=f"{len(self.merged)}/{n_initial} 成功 | Lane 合并 {lanes_merged}/{lanes_expected}",
                      metrics=f"输入 {_fmt_gb(input_bytes)} | md5 "
                              f"{'FAIL ' + str(len(md5_failed)) if md5_failed else 'OK'}"
                              f" | 无效样本 {len(invalid)}",
                      anomalies=[("P0", f"{sm} md5 校验失败（终止分析）") for sm in sorted(md5_failed)]
                                + [("P0", f"{sm} {rs}") for sm, rs in merge_failed.items()],
                      artifacts=f"fastq_merged/*_R*.fastq.gz "
-                               + alerts.artifact_summary(os.path.join(work, "fastq_merged", "*_R*.fastq.gz")),
-                     log_hint=f"tail -f {work}/logs/sample_<样本>.log")
+                               + alerts.artifact_summary(os.path.join(self.work, "fastq_merged", "*_R*.fastq.gz")),
+                     log_hint=f"tail -f {self.work}/logs/sample_<样本>.self.log")
 
-        excluded = {s.strip() for s in (args.exclude_samples or "").split(",") if s.strip()}
+        self.excluded = {s.strip() for s in (self.args.exclude_samples or "").split(",") if s.strip()}
 
-        # ── Step 1：FastQC(raw) → fastp → FastQC(trim) ──
-        if args.step >= 1:
-            t0 = time.time()
-            log.step("Step 1: 原始 QC + 修剪")
 
-            def s1(sm):
-                slog = ctx.slog(sm)
-                r1, r2 = merged[sm]
-                qr1 = os.path.join(work, "qc", "fastqc_raw", f"{sm}_R1_fastqc.zip")
-                qr2 = os.path.join(work, "qc", "fastqc_raw", f"{sm}_R2_fastqc.zip")
-                if not mfastqc.run_fastqc(ctx.runner, [r1, r2],
-                                          os.path.join(work, "qc", "fastqc_raw"),
-                                          plan.fastqc_threads, slog):
-                    return sm, False, "FastQC(raw) 失败"
-                mfastqc.summarize([qr1, qr2], slog, "raw")
-                c1 = os.path.join(work, "fastq_clean", f"{sm}_R1.fastq.gz")
-                c2 = os.path.join(work, "fastq_clean", f"{sm}_R2.fastq.gz")
-                fh = os.path.join(work, "qc", "fastp", f"{sm}.html")
-                fj = os.path.join(work, "qc", "fastp", f"{sm}.json")
-                if not mfastp.run_fastp(ctx.runner, sm, r1, r2, c1, c2, fh, fj,
-                                        plan.fastp_threads, slog):
-                    return sm, False, "fastp 失败"
-                met = mfastp.parse_json(fj)
-                slog.result(f"fastp: 保留率 {met.get('retention_pct')}% "
-                            f"reads {met.get('before_reads')}→{met.get('after_reads')}")
-                mfastp.check_retention(met, slog)
-                t1 = os.path.join(work, "qc", "fastqc_trim", f"{sm}_R1_fastqc.zip")
-                t2 = os.path.join(work, "qc", "fastqc_trim", f"{sm}_R2_fastqc.zip")
-                if not mfastqc.run_fastqc(ctx.runner, [c1, c2],
-                                          os.path.join(work, "qc", "fastqc_trim"),
-                                          plan.fastqc_threads, slog):
-                    slog.warn("FastQC(trim) 失败（不阻断）")
-                else:
-                    mfastqc.summarize([t1, t2], slog, "trim")
-                    mfastqc.check_adapter_cleared(qr1, t1, slog)
-                return sm, True, met
+    # ── step1_qc_trim ──
+    def step1_qc_trim(self):
+        """Step 1：FastQC(raw) → fastp → FastQC(trim)。"""
+        self._t0 = time.time()
+        self.log.step("Step 1: 原始 QC + 修剪")
 
-            res = _parallel({sm: (lambda sm=sm: s1(sm)) for sm in merged}, plan.workers)
-            for sm, r in res.items():
-                if isinstance(r, tuple) and len(r) == 3:
-                    _, ok, note = r
-                    if ok:
-                        met = note or {}
-                        ctx.metrics.setdefault("fastp_retention", {})[sm] = met.get("retention_pct")
-                        # Q30 百分数口径（parse_json 已换算）；整体优先，回退 R1/R2 均值
-                        q30 = met.get("q30_pct")
-                        if q30 is None and met.get("q30_pct_r1") is not None:
-                            q1 = met["q30_pct_r1"]
-                            q2 = met.get("q30_pct_r2", q1)
-                            q30 = round((q1 + q2) / 2, 2)
-                        if q30 is not None:
-                            ctx.metrics.setdefault("q30_pct", {})[sm] = q30
-                    else:
-                        ctx.failed[sm] = f"step1: {note}"
-                        log.error(f"{sm} Step 1 失败: {note}")
-                else:
-                    ctx.failed[sm] = f"step1 异常: {r}"
-                    log.error(f"{sm} Step 1 异常\n{r[1] if isinstance(r, tuple) else ''}")
-            step_time("step1")
-            log.result(f"Step 1 完成: 成功 {len(merged) - len(ctx.failed)}/{len(merged)}")
-            _step_notify(notify_on, batch, 1, "QC+修剪", log,
-                         samples=f"{len(merged) - len(ctx.failed)}/{len(merged)} 成功",
-                         metrics=f"fastp 保留率 {_avg(ctx.metrics.get('fastp_retention'))}% | "
-                                 f"Q30 {_avg(ctx.metrics.get('q30_pct'))}%",
-                         anomalies=_step_anoms(ctx, "step1")
-                                   + alerts.check_fastp(ctx.metrics.get("fastp_retention"),
-                                                        ctx.metrics.get("q30_pct")),
-                         artifacts=f"fastq_clean/*_R*.fastq.gz "
-                                   + alerts.artifact_summary(os.path.join(work, "fastq_clean", "*_R*.fastq.gz")),
-                         log_hint=f"tail -f {work}/logs/sample_<样本>.log")
-
-        # ── Step 2：比对 ──
-        if args.step >= 2:
-            t0 = time.time()
-            log.step(f"Step 2: bwa-mem2 比对（{plan.workers} workers × {plan.threads} 线程，"
-                     f"sort -m {plan.sort_mem}）")
-
-            def s2(sm):
-                slog = ctx.slog(sm)
-                c1 = os.path.join(work, "fastq_clean", f"{sm}_R1.fastq.gz")
-                c2 = os.path.join(work, "fastq_clean", f"{sm}_R2.fastq.gz")
-                bam_dir = os.path.join(work, "bam", sm)
-                if not ctx.runner.dry_run:
-                    os.makedirs(bam_dir, exist_ok=True)
-                sort_bam = os.path.join(bam_dir, f"{sm}.sort.bam")
-                cmd = mbwa.build_align_pipe(ctx.runner, sm, c1, c2, sort_bam,
-                                            plan.threads, plan.threads, plan.sort_mem)
-                rc = ctx.runner.run(cmd, logger=slog, outputs=[sort_bam])
-                if rc != 0:
-                    return sm, False, "比对/排序失败"
-                if not msam.run_index(ctx.runner, sort_bam, slog):
-                    return sm, False, "index 失败"
-                fl = os.path.join(work, "qc", "flagstat", f"{sm}.sorted.flagstat")
-                st = os.path.join(work, "qc", "stats", f"{sm}.sorted.samtools.stats")
-                msam.run_flagstat(ctx.runner, sort_bam, fl, slog)
-                msam.run_stats(ctx.runner, sort_bam, st, slog)
-                fs = msam.parse_flagstat(fl)
-                slog.result(f"mapped {fs.get('mapped_pct')}% properly_paired "
-                            f"{fs.get('pp_pct')}% singletons {fs.get('sgl_pct')}%")
-                qc_ok = msam.qc_judgement(fs, slog)
-                return sm, qc_ok, fs
-
-            res = _parallel({sm: (lambda sm=sm: s2(sm)) for sm in merged
-                             if sm not in ctx.failed}, plan.workers)
-            for sm, r in res.items():
-                if isinstance(r, tuple) and len(r) == 3:
-                    _, ok, fs = r
-                    if isinstance(fs, dict):
-                        ctx.metrics.setdefault("mapped_pct", {})[sm] = fs.get("mapped_pct")
-                        ctx.metrics.setdefault("pp_pct", {})[sm] = fs.get("pp_pct")
-                    if not ok:
-                        ctx.failed[sm] = "step2: 比对质检未达标"
-                else:
-                    ctx.failed[sm] = f"step2 异常: {r}"
-                    log.error(f"{sm} Step 2 异常\n{r[1] if isinstance(r, tuple) else ''}")
-            step_time("step2")
-            log.result(f"Step 2 完成: 成功 {len(merged) - len(ctx.failed)}/{len(merged)}")
-            _step_notify(notify_on, batch, 2, "比对", log,
-                         samples=f"{len(merged) - len(ctx.failed)}/{len(merged)} 成功",
-                         metrics=f"mapped {_avg(ctx.metrics.get('mapped_pct'))}% | "
-                                 f"proper pair {_avg(ctx.metrics.get('pp_pct'))}%",
-                         anomalies=_step_anoms(ctx, "step2")
-                                   + alerts.check_flagstat(ctx.metrics.get("mapped_pct"),
-                                                           ctx.metrics.get("pp_pct")),
-                         artifacts=f"bam/*/*.sort.bam "
-                                   + alerts.artifact_summary(os.path.join(work, "bam", "*", "*.sort.bam")),
-                         log_hint=f"tail -f {work}/logs/sample_<样本>.log")
-
-        # ── Step 3：MarkDuplicates ──
-        if args.step >= 3:
-            t0 = time.time()
-            log.step("Step 3: MarkDuplicates 去重")
-
-            def s3(sm):
-                slog = ctx.slog(sm)
-                bam_dir = os.path.join(work, "bam", sm)
-                sort_bam = os.path.join(bam_dir, f"{sm}.sort.bam")
-                md_bam = os.path.join(bam_dir, f"{sm}.markdup.bam")
-                metrics_f = os.path.join(bam_dir, f"{sm}.markdup.metrics")
-                if not mgatk.markdup(ctx.runner, sort_bam, md_bam, metrics_f,
-                                     plan.gatk_mem, slog):
-                    return sm, False, None
-                met = mgatk.parse_markdup_metrics(metrics_f)
-                slog.result(f"READ_PAIRS={met.get('READ_PAIRS_EXAMINED')} "
-                            f"DUP={_pct(met.get('PERCENT_DUPLICATION'))} "
-                            f"ELS={met.get('ESTIMATED_LIBRARY_SIZE')}")
-                mgatk.qc_duplication(met, slog)
-                fl = os.path.join(work, "qc", "flagstat", f"{sm}.markdup.flagstat")
-                st = os.path.join(work, "qc", "stats", f"{sm}.markdup.samtools.stats")
-                msam.run_flagstat(ctx.runner, md_bam, fl, slog)
-                msam.run_stats(ctx.runner, md_bam, st, slog)
-                # 去重前 flagstat 的 duplicates 行无意义，不采集（硬性要求）
-                return sm, True, met
-
-            res = _parallel({sm: (lambda sm=sm: s3(sm)) for sm in merged
-                             if sm not in ctx.failed}, plan.workers)
-            for sm, r in res.items():
-                if isinstance(r, tuple) and len(r) == 3:
-                    _, ok, met = r
-                    ctx.metrics.setdefault("dup_pct", {})[sm] = \
-                        round(met["PERCENT_DUPLICATION"] * 100, 2) \
-                        if met and met.get("PERCENT_DUPLICATION") is not None else None
-                    if met:
-                        ctx.metrics.setdefault("els", {})[sm] = \
-                            met.get("ESTIMATED_LIBRARY_SIZE")
-                    if not ok:
-                        ctx.failed[sm] = "step3: MarkDuplicates 失败"
-                else:
-                    ctx.failed[sm] = f"step3 异常: {r}"
-            step_time("step3")
-            log.result(f"Step 3 完成: 成功 {len(merged) - len(ctx.failed)}/{len(merged)}")
-            _step_notify(notify_on, batch, 3, "去重", log,
-                         samples=f"{len(merged) - len(ctx.failed)}/{len(merged)} 成功",
-                         metrics=f"重复率 {_avg(ctx.metrics.get('dup_pct'))}% | "
-                                 f"ELS 最小 {alerts._min_item(ctx.metrics.get('els'))[1]}",
-                         anomalies=_step_anoms(ctx, "step3")
-                                   + alerts.check_dup(ctx.metrics.get("dup_pct")),
-                         artifacts=f"bam/*/*.markdup.bam "
-                                   + alerts.artifact_summary(os.path.join(work, "bam", "*", "*.markdup.bam")),
-                         log_hint=f"tail -f {work}/logs/sample_<样本>.log")
-
-        # ── Step 4：BQSR ──
-        if args.step >= 4:
-            t0 = time.time()
-            log.step("Step 4: BQSR 校准")
-
-            def s4(sm):
-                slog = ctx.slog(sm)
-                bam_dir = os.path.join(work, "bam", sm)
-                md_bam = os.path.join(bam_dir, f"{sm}.markdup.bam")
-                table = os.path.join(bam_dir, f"{sm}.recal.table")
-                bqsr_bam = os.path.join(bam_dir, f"{sm}.markdup.BQSR.bam")
-                if not mgatk.base_recalibrator(ctx.runner, md_bam, table,
-                                               plan.gatk_mem, slog):
-                    return sm, False, "BaseRecalibrator 失败"
-                if not mgatk.apply_bqsr(ctx.runner, md_bam, table, bqsr_bam,
-                                        plan.gatk_mem, slog):
-                    return sm, False, "ApplyBQSR 失败"
-                fl_md = os.path.join(work, "qc", "flagstat", f"{sm}.markdup.flagstat")
-                fl_rc = os.path.join(work, "qc", "flagstat", f"{sm}.recal.flagstat")
-                st_rc = os.path.join(work, "qc", "stats", f"{sm}.recal.samtools.stats")
-                msam.run_flagstat(ctx.runner, bqsr_bam, fl_rc, slog)
-                msam.run_stats(ctx.runner, bqsr_bam, st_rc, slog)
-                if not ctx.runner.dry_run and not msam.flagstat_identical(fl_md, fl_rc):
-                    return sm, False, "markdup 与 BQSR flagstat 不一致（判 FAIL）"
-                slog.result("BQSR 前后 flagstat 逐行一致 ✓" if not ctx.runner.dry_run
-                            else "BQSR 前后 flagstat 断言（dry-run 跳过实际比对）")
-                return sm, True, None
-
-            res = _parallel({sm: (lambda sm=sm: s4(sm)) for sm in merged
-                             if sm not in ctx.failed}, plan.workers)
-            for sm, r in res.items():
-                if isinstance(r, tuple) and len(r) == 3:
-                    _, ok, note = r
-                    if not ok:
-                        ctx.failed[sm] = f"step4: {note}"
-                        log.error(f"{sm}: {note}")
-                else:
-                    ctx.failed[sm] = f"step4 异常: {r}"
-            step_time("step4")
-            n_bqsr_ok = len([sm for sm in merged if sm not in ctx.failed])
-            log.result(f"Step 4 完成: 成功 {n_bqsr_ok}/{len(merged)}")
-            _step_notify(notify_on, batch, 4, "BQSR校准", log,
-                         samples=f"{n_bqsr_ok}/{len(merged)} 成功",
-                         metrics="markdup↔BQSR flagstat 逐行一致断言 "
-                                 f"{n_bqsr_ok}/{n_bqsr_ok} 通过",
-                         anomalies=_step_anoms(ctx, "step4"),
-                         artifacts=f"bam/*/*.markdup.BQSR.bam "
-                                   + alerts.artifact_summary(os.path.join(work, "bam", "*", "*.markdup.BQSR.bam")),
-                         log_hint=f"tail -f {work}/logs/sample_<样本>.log")
-
-        # ── Step 5：变异检测（gVCF → 联合分型 → 硬过滤 → VCF） ──
-        cohort_stats = {}
-        if args.step >= 5:
-            t0 = time.time()
-            log.step("Step 5: 变异检测")
-            # 排序保证与 VCF 样本列序（gvcf.list=sorted）一致——矩阵列映射/裁决/重建都依赖此顺序
-            calling = sorted(sm for sm in merged
-                             if sm not in ctx.failed and sm not in excluded)
-            for sm in sorted(excluded & set(merged)):
-                log.info(f"对照样本 {sm} 按配置排除出联合变异检测（纳入 QC）")
-            bdata["samples"]["calling"] = calling
-            if not calling:
-                raise RuntimeError("无可用于联合变异检测的样本（全部失败或被排除）")
-            if not mgatk.prep_interval_list(ctx.runner, log):
-                raise RuntimeError("interval_list 准备失败")
-
-            def s5(sm):
-                slog = ctx.slog(sm)
-                bam_dir = os.path.join(work, "bam", sm)
-                bqsr_bam = os.path.join(bam_dir, f"{sm}.markdup.BQSR.bam")
-                gvcf = os.path.join(work, "gvcf", f"{sm}.g.vcf.gz")
-                if not mgatk.haplotypecaller(ctx.runner, bqsr_bam, gvcf,
-                                             plan.gatk_mem, plan.hc_hmm_threads, slog):
-                    return sm, False
-                return sm, True
-
-            res = _parallel({sm: (lambda sm=sm: s5(sm)) for sm in calling}, plan.workers)
-            hc_ok = []
-            for sm, r in res.items():
-                if r == (sm, True):
-                    hc_ok.append(sm)
-                else:
-                    ctx.failed[sm] = "step5: HaplotypeCaller 失败"
-                    log.error(f"{sm} HC 失败\n{r[1] if isinstance(r, tuple) else ''}")
-            if not hc_ok:
-                raise RuntimeError("全部 HaplotypeCaller 失败")
-            hc_ok = sorted(hc_ok)
-            bdata["samples"]["calling"] = hc_ok   # 实际进入联合分型的样本（排序）
-            log.result(f"HaplotypeCaller 完成 {len(hc_ok)}/{len(calling)}，进入联合分型")
-
-            # cohort 级（串行，gvcf.list 每次重新生成；dry-run 零落盘只打印命令）
-            coh = os.path.join(work, "cohort")
-            gvcf_list = os.path.join(coh, "gvcf.list")
-            if not ctx.runner.dry_run:
-                with open(gvcf_list, "w", encoding="utf-8") as f:
-                    for sm in sorted(hc_ok):
-                        f.write(ctx.runner.cpath(os.path.join(work, "gvcf", f"{sm}.g.vcf.gz")) + "\n")
-                log.info(f"gvcf.list 重新生成: {len(hc_ok)} 个 gVCF（批次内联合，严禁跨批次）")
-            combined = os.path.join(coh, "cohort.g.vcf.gz")
-            raw_vcf = os.path.join(coh, "cohort.raw.vcf.gz")
-            if not mgatk.combine_gvcfs(ctx.runner, gvcf_list, combined,
-                                       plan.cohort_mem, log):
-                raise RuntimeError("CombineGVCFs 失败")
-            if not mgatk.genotype_gvcfs(ctx.runner, combined, raw_vcf,
-                                        plan.cohort_mem, log):
-                raise RuntimeError("GenotypeGVCFs 失败")
-            mbc.run_stats(ctx.runner, raw_vcf,
-                          os.path.join(work, "qc", "bcftools_stats", "cohort.raw.stats"), log)
-            cohort_stats["raw"] = mbc.parse_stats(
-                os.path.join(work, "qc", "bcftools_stats", "cohort.raw.stats"))
-
-            split_vcf = os.path.join(coh, "cohort.raw.split.vcf.gz")
-            norm_stats_json = os.path.join(coh, "norm_stats.json")
-            ok, norm_stats = mbc.norm_split(ctx.runner, raw_vcf, split_vcf, log)
-            if not ok:
-                raise RuntimeError("bcftools norm 失败")
-            if norm_stats:   # 统计落盘，SKIP 续跑时仍可报告
-                with open(norm_stats_json, "w", encoding="utf-8") as f:
-                    json.dump(norm_stats, f)
+        def s1(sm):
+            slog = self.slog(sm)
+            r1, r2 = self.merged[sm]
+            qr1 = os.path.join(self.work, "qc", "fastqc_raw", f"{sm}_R1_fastqc.zip")
+            qr2 = os.path.join(self.work, "qc", "fastqc_raw", f"{sm}_R2_fastqc.zip")
+            if not mfastqc.run_fastqc(self.runner, [r1, r2],
+                                      os.path.join(self.work, "qc", "fastqc_raw"),
+                                      self.plan.fastqc_threads, slog):
+                return sm, False, "FastQC(raw) 失败"
+            mfastqc.summarize([qr1, qr2], slog, "raw")
+            c1 = os.path.join(self.work, "fastq_clean", f"{sm}_R1.fastq.gz")
+            c2 = os.path.join(self.work, "fastq_clean", f"{sm}_R2.fastq.gz")
+            fh = os.path.join(self.work, "qc", "fastp", f"{sm}.html")
+            fj = os.path.join(self.work, "qc", "fastp", f"{sm}.json")
+            if not mfastp.run_fastp(self.runner, sm, r1, r2, c1, c2, fh, fj,
+                                    self.plan.fastp_threads, slog):
+                return sm, False, "fastp 失败"
+            met = mfastp.parse_json(fj)
+            slog.result(f"fastp: 保留率 {met.get('retention_pct')}% "
+                        f"reads {met.get('before_reads')}→{met.get('after_reads')}")
+            mfastp.check_retention(met, slog)
+            t1 = os.path.join(self.work, "qc", "fastqc_trim", f"{sm}_R1_fastqc.zip")
+            t2 = os.path.join(self.work, "qc", "fastqc_trim", f"{sm}_R2_fastqc.zip")
+            if not mfastqc.run_fastqc(self.runner, [c1, c2],
+                                      os.path.join(self.work, "qc", "fastqc_trim"),
+                                      self.plan.fastqc_threads, slog):
+                slog.warn("FastQC(trim) 失败（不阻断）")
             else:
-                try:
-                    with open(norm_stats_json, encoding="utf-8") as f:
-                        norm_stats = json.load(f)
-                except (OSError, ValueError):
-                    norm_stats = {}
-            cohort_stats["norm"] = norm_stats
-            log.result(f"norm 摊平: {norm_stats}（后续一切靶区提取加 ±100bp padding）")
+                mfastqc.summarize([t1, t2], slog, "trim")
+                mfastqc.check_adapter_cleared(qr1, t1, slog)
+            return sm, True, met
 
-            snp_v = os.path.join(coh, "cohort.snp.vcf.gz")
-            indel_v = os.path.join(coh, "cohort.indel.vcf.gz")
-            snp_f = os.path.join(coh, "cohort.snp.hardfiltered.vcf.gz")
-            indel_f = os.path.join(coh, "cohort.indel.hardfiltered.vcf.gz")
-            hard_v = os.path.join(coh, "cohort.hardfiltered.vcf.gz")
-            pass_v = os.path.join(coh, "cohort.PASS.vcf.gz")
-            if not mgatk.select_variants(ctx.runner, split_vcf, "SNP", snp_v,
-                                         plan.gatk_mem, log) \
-                    or not mgatk.select_variants(ctx.runner, split_vcf, "INDEL", indel_v,
-                                                 plan.gatk_mem, log):
-                raise RuntimeError("SelectVariants 失败")
-            if not mgatk.variant_filtration(ctx.runner, snp_v, snp_f,
-                                            config.SNP_HARD_FILTERS, plan.gatk_mem, log) \
-                    or not mgatk.variant_filtration(ctx.runner, indel_v, indel_f,
-                                                    config.INDEL_HARD_FILTERS,
-                                                    plan.gatk_mem, log):
-                raise RuntimeError("VariantFiltration 失败")
-            if not mbc.concat(ctx.runner, [snp_f, indel_f], hard_v, log):
-                raise RuntimeError("bcftools concat 失败")
-            mbc.index_tbi(ctx.runner, hard_v, log)
-            filt_ok, filt_dist = mbc.filter_column_check(ctx.runner, hard_v, log)
-            if not filt_ok:
-                raise RuntimeError("FILTER 列出现 '.'——过滤漏跑，判 FAIL")
-            log.result(f"FILTER 标签分布: {filt_dist}")
-            if not mbc.view_pass(ctx.runner, hard_v, pass_v, log):
-                raise RuntimeError("PASS 提取失败")
-            mbc.index_tbi(ctx.runner, pass_v, log)
-
-            # 双口径导出 + stats
-            mbc.export_genotype_matrix(
-                ctx.runner, hard_v, os.path.join(work, "matrix", "genotype_matrix.tsv"), log)
-            mbc.export_detail_pass(
-                ctx.runner, pass_v, os.path.join(work, "matrix",
-                                                 "genotype_detail_PASS.tsv"), log)
-            mbc.run_stats(ctx.runner, hard_v, os.path.join(
-                work, "qc", "bcftools_stats", "cohort.hardfiltered.stats"), log)
-            mbc.run_stats(ctx.runner, pass_v, os.path.join(
-                work, "qc", "bcftools_stats", "cohort.PASS.stats"), log)
-            cohort_stats["hardfiltered"] = mbc.parse_stats(os.path.join(
-                work, "qc", "bcftools_stats", "cohort.hardfiltered.stats"))
-            cohort_stats["PASS"] = mbc.parse_stats(os.path.join(
-                work, "qc", "bcftools_stats", "cohort.PASS.stats"))
-            # 每样本 hardfiltered / PASS（未裁决版，供追溯）
-            for sm in calling:
-                hf_sm = os.path.join(work, "per_sample_vcf", f"{sm}.hardfiltered.vcf.gz")
-                ps_sm = os.path.join(work, "per_sample_vcf", f"{sm}.PASS.vcf.gz")
-                mbc.split_sample(ctx.runner, hard_v, sm, hf_sm, ctx.slog(sm))
-                mbc.index_tbi(ctx.runner, hf_sm, ctx.slog(sm))
-                mbc.split_sample(ctx.runner, pass_v, sm, ps_sm, ctx.slog(sm))
-                mbc.index_tbi(ctx.runner, ps_sm, ctx.slog(sm))
-
-            tt_raw = cohort_stats["raw"].get("titv")
-            tt_pass = cohort_stats["PASS"].get("titv")
-            log.result(f"Ti/Tv: raw {tt_raw} → PASS {tt_pass}（应上升；panel 参考区间 2.5-3.5，"
-                       f"看趋势不看绝对值）")
-            step_time("step5")
-            bdata["artifacts"].update({
-                "cohort_PASS_vcf": pass_v,
-                "genotype_matrix": os.path.join(work, "matrix", "genotype_matrix.tsv"),
-                "genotype_detail_PASS": os.path.join(work, "matrix",
-                                                     "genotype_detail_PASS.tsv")})
-
-            # 对账·数量：矩阵行数 vs hardfiltered 限定 targets 的记录数（应一致）
-            recon_anoms = _step_anoms(ctx, "step5")
-            if not ctx.runner.dry_run:
-                matrix_n = sum(1 for _ in open(
-                    os.path.join(work, "matrix", "genotype_matrix.tsv"), encoding="utf-8"))
-                # 同口径核对（矩阵由 query -R 生成，核对也用 -R：
-                # -R/-T 在区间边界对跨界 indel 的取舍不同，混用会有固有差额）
-                view_n_out = ctx.runner.out(
-                    f"{ctx.runner.tool('bcftools', 'bcftools view -R ' + ctx.runner.cpath(config.TARGETS_SORTED_BED) + ' -H ' + ctx.runner.cpath(hard_v))} | wc -l")
-                try:
-                    view_n = int(view_n_out.strip().split()[-1])
-                except (ValueError, IndexError):
-                    view_n = None
-                log.result(f"对账·数量: 矩阵 {matrix_n} 行 vs view -R 计数 {view_n}")
-                if view_n is not None and matrix_n != view_n:
-                    recon_anoms.append(("P1", f"对账·数量：矩阵行数 {matrix_n} ≠ 靶区记录数 "
-                                              f"{view_n}（导出可能不完整）"))
-                # 对账·新鲜度：关键 VCF mtime < 本次启动（断点续跑复用旧产物）
-                stale = []
-                for key_vcf in [pass_v, hard_v]:
-                    if nonempty(key_vcf) and os.path.getmtime(key_vcf) < ctx.started:
-                        stale.append(os.path.basename(key_vcf))
-                adj_all = sorted(glob.glob(os.path.join(
-                    work, "per_sample_vcf", "*.PASS.adjudicated.vcf.gz")))
-                if adj_all and all(os.path.getmtime(p) < ctx.started for p in adj_all):
-                    stale.append("每样本裁决VCF×" + str(len(adj_all)))
-                if stale:
-                    recon_anoms.append(("P1", "对账·新鲜度：" + ", ".join(stale)
-                                        + " 为历史运行产物（断点续跑复用）"))
-
-            _step_notify(notify_on, batch, 5, "变异检测", log,
-                         samples=f"gVCF {len(hc_ok)}/{len(calling)} | 联合分型样本 {len(hc_ok)}",
-                         metrics=f"raw {cohort_stats['raw'].get('records')} → PASS "
-                                 f"{cohort_stats['PASS'].get('records')} | "
-                                 f"SNP/INDEL PASS {cohort_stats['PASS'].get('snps')}/"
-                                 f"{cohort_stats['PASS'].get('indels')} | "
-                                 f"Ti/Tv {tt_raw}→{tt_pass} | "
-                                 f"norm split/realigned {norm_stats.get('split')}/"
-                                 f"{norm_stats.get('realigned')}",
-                         anomalies=recon_anoms,
-                         artifacts=f"cohort/cohort.PASS.vcf.gz "
-                                   + alerts.artifact_summary(os.path.join(work, "cohort", "*.vcf.gz")),
-                         log_hint=f"tail -f {work}/logs/pipeline_*.log")
-
-        # ── Step 6：测序质量与汇总 ──
-        if args.step >= 6:
-            t0 = time.time()
-            log.step("Step 6: mosdepth ×2 + HsMetrics + 矩阵裁决 + MultiQC")
-
-            def s6(sm):
-                slog = ctx.slog(sm)
-                bam_dir = os.path.join(work, "bam", sm)
-                md_bam = os.path.join(bam_dir, f"{sm}.markdup.bam")
-                bqsr_bam = os.path.join(bam_dir, f"{sm}.markdup.BQSR.bam")
-                ms = {}
-                for tag, bam in (("md", md_bam), ("bqsr", bqsr_bam)):
-                    prefix = os.path.join(work, "qc", "mosdepth", f"{sm}.{tag}")
-                    if not mmos.run_mosdepth(ctx.runner, bam, prefix,
-                                             plan.mosdepth_threads, slog):
-                        slog.warn(f"mosdepth({tag}) 失败（不阻断）")
-                        continue
-                    summ = mmos.parse_summary(prefix)
-                    ms[tag] = summ["mean"]
-                    slog.result(f"mosdepth[{tag}] 靶区均值={ms[tag]}×")
-                hs_txt = os.path.join(work, "qc", "hsmetrics", f"{sm}.hs_metrics.txt")
-                if not mgatk.collect_hsmetrics(ctx.runner, bqsr_bam, hs_txt,
-                                               plan.gatk_mem, slog):
-                    return sm, False, (ms, None)
-                hs = mgatk.parse_hsmetrics(hs_txt)
-                mgatk.qc_hsmetrics(hs, slog, control=sm in excluded)
-                return sm, True, (ms, hs)
-
-            res = _parallel({sm: (lambda sm=sm: s6(sm)) for sm in merged
-                             if sm not in ctx.failed}, plan.workers)
-            for sm, r in res.items():
-                if isinstance(r, tuple) and len(r) == 3:
-                    _, ok, (ms, hs) = r
-                    ctx.metrics.setdefault("mosdepth_mean", {})[sm] = ms.get("bqsr")
-                    if hs:
-                        ctx.metrics.setdefault("mean_target_coverage", {})[sm] = \
-                            hs.get("MEAN_TARGET_COVERAGE")
-                        ctx.metrics.setdefault("pct_20x", {})[sm] = \
-                            round((hs.get("PCT_TARGET_BASES_20X") or 0) * 100, 2)
-                        ctx.metrics.setdefault("on_target_pct", {})[sm] = \
-                            hs.get("ON_TARGET_PCT")
-                    if not ok:
-                        ctx.failed[sm] = "step6: HsMetrics 失败"
+        res = _parallel({sm: (lambda sm=sm: s1(sm)) for sm in self.merged}, self.plan.workers)
+        for sm, r in res.items():
+            if isinstance(r, tuple) and len(r) == 3:
+                _, ok, note = r
+                if ok:
+                    met = note or {}
+                    self.metrics.setdefault("fastp_retention", {})[sm] = met.get("retention_pct")
+                    # Q30 百分数口径（parse_json 已换算）；整体优先，回退 R1/R2 均值
+                    q30 = met.get("q30_pct")
+                    if q30 is None and met.get("q30_pct_r1") is not None:
+                        q1 = met["q30_pct_r1"]
+                        q2 = met.get("q30_pct_r2", q1)
+                        q30 = round((q1 + q2) / 2, 2)
+                    if q30 is not None:
+                        self.metrics.setdefault("q30_pct", {})[sm] = q30
                 else:
-                    ctx.failed[sm] = f"step6 异常: {r}"
+                    self.failed[sm] = f"step1: {note}"
+                    self.log.error(f"{sm} Step 1 失败: {note}")
+            else:
+                self.failed[sm] = f"step1 异常: {r}"
+                self.log.error(f"{sm} Step 1 异常\n{r[1] if isinstance(r, tuple) else ''}")
+        self.step_time("step1")
+        self.log.result(f"Step 1 完成: 成功 {len(self.merged) - len(self.failed)}/{len(self.merged)}")
+        _step_notify(self.notify_on, self.batch, 1, "QC+修剪", self.log,
+                     samples=f"{len(self.merged) - len(self.failed)}/{len(self.merged)} 成功",
+                     metrics=f"fastp 保留率 {_avg(self.metrics.get('fastp_retention'))}% | "
+                             f"Q30 {_avg(self.metrics.get('q30_pct'))}%",
+                     anomalies=_step_anoms(self, "step1")
+                               + alerts.check_fastp(self.metrics.get("fastp_retention"),
+                                                    self.metrics.get("q30_pct")),
+                     artifacts=f"fastq_clean/*_R*.fastq.gz "
+                               + alerts.artifact_summary(os.path.join(self.work, "fastq_clean", "*_R*.fastq.gz")),
+                     log_hint=f"tail -f {self.work}/logs/sample_<样本>.self.log")
 
-            # 矩阵 ./. 裁决（mosdepth bqsr regions，DP≥20 改判 0/0）+ 每样本 PASS 重建
-            calling = sorted(bdata["samples"].get("calling") or
-                             [sm for sm in merged if sm not in ctx.failed])
-            adj_tsv = os.path.join(work, "matrix", "genotype_matrix.adjudicated.tsv")
-            adj_stats = None
-            if calling and cohort_stats and not ctx.runner.dry_run:
-                regions_cache = {}
-                for sm in calling:
-                    prefix = os.path.join(work, "qc", "mosdepth", f"{sm}.bqsr")
-                    regions_cache[sm] = mmos.load_regions(prefix)
 
-                def region_of(sm, chrom, pos):
-                    return mmos.region_depth(regions_cache.get(sm, []), chrom, pos)
+    # ── step2_align ──
+    def step2_align(self):
+        """Step 2：bwa-mem2 比对 + sort + flagstat/stats 质检。"""
+        self._t0 = time.time()
+        self.log.step(f"Step 2: bwa-mem2 比对（{self.plan.workers} workers × {self.plan.threads} 线程，"
+                 f"sort -m {self.plan.sort_mem}）")
 
-                matrix = os.path.join(work, "matrix", "genotype_matrix.tsv")
-                out_lines, adj_stats = mbc.adjudicate_matrix(matrix, region_of, calling,
-                                                         config.DP_MIN)
-                with open(adj_tsv, "w", encoding="utf-8") as f:
-                    f.write("\n".join(out_lines) + "\n")
-                log.result(f"矩阵 ./. 裁决: 总 ./. {adj_stats['dotdot_total']} → "
-                           f"改判 0/0 {adj_stats['filled_00']} · 保留 ./. "
-                           f"{adj_stats['kept_dotdot']}（DP_MIN={config.DP_MIN}）")
-                bdata["artifacts"]["genotype_matrix_adjudicated"] = adj_tsv
+        def s2(sm):
+            slog = self.slog(sm)
+            c1 = os.path.join(self.work, "fastq_clean", f"{sm}_R1.fastq.gz")
+            c2 = os.path.join(self.work, "fastq_clean", f"{sm}_R2.fastq.gz")
+            bam_dir = os.path.join(self.work, "bam", sm)
+            if not self.runner.dry_run:
+                os.makedirs(bam_dir, exist_ok=True)
+            sort_bam = os.path.join(bam_dir, f"{sm}.sort.bam")
+            cmd = mbwa.build_align_pipe(self.runner, sm, c1, c2, sort_bam,
+                                        self.plan.threads, self.plan.threads, self.plan.sort_mem)
+            rc = self.runner.run(cmd, logger=slog, outputs=[sort_bam])
+            if rc != 0:
+                return sm, False, "比对/排序失败"
+            if not msam.run_index(self.runner, sort_bam, slog):
+                return sm, False, "index 失败"
+            fl = os.path.join(self.work, "qc", "flagstat", f"{sm}.sorted.flagstat")
+            st = os.path.join(self.work, "qc", "stats", f"{sm}.sorted.samtools.stats")
+            msam.run_flagstat(self.runner, sort_bam, fl, slog)
+            msam.run_stats(self.runner, sort_bam, st, slog)
+            fs = msam.parse_flagstat(fl)
+            slog.result(f"mapped {fs.get('mapped_pct')}% properly_paired "
+                        f"{fs.get('pp_pct')}% singletons {fs.get('sgl_pct')}%")
+            qc_ok = msam.qc_judgement(fs, slog)
+            return sm, qc_ok, fs
 
-                # 每样本 PASS VCF 重建（bcftools view -s 拆分 + GT 替换，其余字段原样保留）
-                pass_v = os.path.join(work, "cohort", "cohort.PASS.vcf.gz")
-                adj_vcfs = {}
-                import tempfile
-                import shlex as _shlex
-                for sm in calling:
-                    slog = ctx.slog(sm)
-                    out_vcf = os.path.join(work, "per_sample_vcf",
-                                           f"{sm}.PASS.adjudicated.vcf.gz")
-                    if nonempty(out_vcf) and nonempty(out_vcf + ".tbi"):
-                        adj_vcfs[sm] = out_vcf
+        res = _parallel({sm: (lambda sm=sm: s2(sm)) for sm in self.merged
+                         if sm not in self.failed}, self.plan.workers)
+        for sm, r in res.items():
+            if isinstance(r, tuple) and len(r) == 3:
+                _, ok, fs = r
+                if isinstance(fs, dict):
+                    self.metrics.setdefault("mapped_pct", {})[sm] = fs.get("mapped_pct")
+                    self.metrics.setdefault("pp_pct", {})[sm] = fs.get("pp_pct")
+                if not ok:
+                    self.failed[sm] = "step2: 比对质检未达标"
+            else:
+                self.failed[sm] = f"step2 异常: {r}"
+                self.log.error(f"{sm} Step 2 异常\n{r[1] if isinstance(r, tuple) else ''}")
+        self.step_time("step2")
+        self.log.result(f"Step 2 完成: 成功 {len(self.merged) - len(self.failed)}/{len(self.merged)}")
+        _step_notify(self.notify_on, self.batch, 2, "比对", self.log,
+                     samples=f"{len(self.merged) - len(self.failed)}/{len(self.merged)} 成功",
+                     metrics=f"mapped {_avg(self.metrics.get('mapped_pct'))}% | "
+                             f"proper pair {_avg(self.metrics.get('pp_pct'))}%",
+                     anomalies=_step_anoms(self, "step2")
+                               + alerts.check_flagstat(self.metrics.get("mapped_pct"),
+                                                       self.metrics.get("pp_pct")),
+                     artifacts=f"bam/*/*.sort.bam "
+                               + alerts.artifact_summary(os.path.join(self.work, "bam", "*", "*.sort.bam")),
+                     log_hint=f"tail -f {self.work}/logs/sample_<样本>.self.log")
+
+
+    # ── step3_markdup ──
+    def step3_markdup(self):
+        """Step 3：MarkDuplicates 去重 + metrics/flagstat/stats。"""
+        self._t0 = time.time()
+        self.log.step("Step 3: MarkDuplicates 去重")
+
+        def s3(sm):
+            slog = self.slog(sm)
+            bam_dir = os.path.join(self.work, "bam", sm)
+            sort_bam = os.path.join(bam_dir, f"{sm}.sort.bam")
+            md_bam = os.path.join(bam_dir, f"{sm}.markdup.bam")
+            metrics_f = os.path.join(bam_dir, f"{sm}.markdup.metrics")
+            if not mgatk.markdup(self.runner, sort_bam, md_bam, metrics_f,
+                                 self.plan.gatk_mem, slog):
+                return sm, False, None
+            met = mgatk.parse_markdup_metrics(metrics_f)
+            slog.result(f"READ_PAIRS={met.get('READ_PAIRS_EXAMINED')} "
+                        f"DUP={_pct(met.get('PERCENT_DUPLICATION'))} "
+                        f"ELS={met.get('ESTIMATED_LIBRARY_SIZE')}")
+            mgatk.qc_duplication(met, slog)
+            fl = os.path.join(self.work, "qc", "flagstat", f"{sm}.markdup.flagstat")
+            st = os.path.join(self.work, "qc", "stats", f"{sm}.markdup.samtools.stats")
+            msam.run_flagstat(self.runner, md_bam, fl, slog)
+            msam.run_stats(self.runner, md_bam, st, slog)
+            # 去重前 flagstat 的 duplicates 行无意义，不采集（硬性要求）
+            return sm, True, met
+
+        res = _parallel({sm: (lambda sm=sm: s3(sm)) for sm in self.merged
+                         if sm not in self.failed}, self.plan.workers)
+        for sm, r in res.items():
+            if isinstance(r, tuple) and len(r) == 3:
+                _, ok, met = r
+                self.metrics.setdefault("dup_pct", {})[sm] = \
+                    round(met["PERCENT_DUPLICATION"] * 100, 2) \
+                    if met and met.get("PERCENT_DUPLICATION") is not None else None
+                if met:
+                    self.metrics.setdefault("els", {})[sm] = \
+                        met.get("ESTIMATED_LIBRARY_SIZE")
+                if not ok:
+                    self.failed[sm] = "step3: MarkDuplicates 失败"
+            else:
+                self.failed[sm] = f"step3 异常: {r}"
+        self.step_time("step3")
+        self.log.result(f"Step 3 完成: 成功 {len(self.merged) - len(self.failed)}/{len(self.merged)}")
+        _step_notify(self.notify_on, self.batch, 3, "去重", self.log,
+                     samples=f"{len(self.merged) - len(self.failed)}/{len(self.merged)} 成功",
+                     metrics=f"重复率 {_avg(self.metrics.get('dup_pct'))}% | "
+                             f"ELS 最小 {alerts._min_item(self.metrics.get('els'))[1]}",
+                     anomalies=_step_anoms(self, "step3")
+                               + alerts.check_dup(self.metrics.get("dup_pct")),
+                     artifacts=f"bam/*/*.markdup.bam "
+                               + alerts.artifact_summary(os.path.join(self.work, "bam", "*", "*.markdup.bam")),
+                     log_hint=f"tail -f {self.work}/logs/sample_<样本>.self.log")
+
+
+    # ── step4_bqsr ──
+    def step4_bqsr(self):
+        """Step 4：BQSR 校准 + 前后 flagstat 逐行一致断言。"""
+        self._t0 = time.time()
+        self.log.step("Step 4: BQSR 校准")
+
+        def s4(sm):
+            slog = self.slog(sm)
+            bam_dir = os.path.join(self.work, "bam", sm)
+            md_bam = os.path.join(bam_dir, f"{sm}.markdup.bam")
+            table = os.path.join(bam_dir, f"{sm}.recal.table")
+            bqsr_bam = os.path.join(bam_dir, f"{sm}.markdup.BQSR.bam")
+            if not mgatk.base_recalibrator(self.runner, md_bam, table,
+                                           self.plan.gatk_mem, slog):
+                return sm, False, "BaseRecalibrator 失败"
+            if not mgatk.apply_bqsr(self.runner, md_bam, table, bqsr_bam,
+                                    self.plan.gatk_mem, slog):
+                return sm, False, "ApplyBQSR 失败"
+            fl_md = os.path.join(self.work, "qc", "flagstat", f"{sm}.markdup.flagstat")
+            fl_rc = os.path.join(self.work, "qc", "flagstat", f"{sm}.recal.flagstat")
+            st_rc = os.path.join(self.work, "qc", "stats", f"{sm}.recal.samtools.stats")
+            msam.run_flagstat(self.runner, bqsr_bam, fl_rc, slog)
+            msam.run_stats(self.runner, bqsr_bam, st_rc, slog)
+            if not self.runner.dry_run and not msam.flagstat_identical(fl_md, fl_rc):
+                return sm, False, "markdup 与 BQSR flagstat 不一致（判 FAIL）"
+            slog.result("BQSR 前后 flagstat 逐行一致 ✓" if not self.runner.dry_run
+                        else "BQSR 前后 flagstat 断言（dry-run 跳过实际比对）")
+            return sm, True, None
+
+        res = _parallel({sm: (lambda sm=sm: s4(sm)) for sm in self.merged
+                         if sm not in self.failed}, self.plan.workers)
+        for sm, r in res.items():
+            if isinstance(r, tuple) and len(r) == 3:
+                _, ok, note = r
+                if not ok:
+                    self.failed[sm] = f"step4: {note}"
+                    self.log.error(f"{sm}: {note}")
+            else:
+                self.failed[sm] = f"step4 异常: {r}"
+        self.step_time("step4")
+        n_bqsr_ok = len([sm for sm in self.merged if sm not in self.failed])
+        self.log.result(f"Step 4 完成: 成功 {n_bqsr_ok}/{len(self.merged)}")
+        _step_notify(self.notify_on, self.batch, 4, "BQSR校准", self.log,
+                     samples=f"{n_bqsr_ok}/{len(self.merged)} 成功",
+                     metrics="markdup↔BQSR flagstat 逐行一致断言 "
+                             f"{n_bqsr_ok}/{n_bqsr_ok} 通过",
+                     anomalies=_step_anoms(self, "step4"),
+                     artifacts=f"bam/*/*.markdup.BQSR.bam "
+                               + alerts.artifact_summary(os.path.join(self.work, "bam", "*", "*.markdup.BQSR.bam")),
+                     log_hint=f"tail -f {self.work}/logs/sample_<样本>.self.log")
+
+
+    # ── step5_variant_calling ──
+    def step5_variant_calling(self):
+        """Step 5：HaplotypeCaller gVCF → 批次内联合分型 → norm → 硬过滤 → PASS
+        → 双口径矩阵导出 → 对账（数量 -R 同口径/新鲜度）。"""
+        self.cohort_stats = {}
+        self._t0 = time.time()
+        self.log.step("Step 5: 变异检测")
+        # 排序保证与 VCF 样本列序（gvcf.list=sorted）一致——矩阵列映射/裁决/重建都依赖此顺序
+        calling = sorted(sm for sm in self.merged
+                         if sm not in self.failed and sm not in self.excluded)
+        for sm in sorted(self.excluded & set(self.merged)):
+            self.log.info(f"对照样本 {sm} 按配置排除出联合变异检测（纳入 QC）")
+        self.bdata["samples"]["calling"] = calling
+        if not calling:
+            raise RuntimeError("无可用于联合变异检测的样本（全部失败或被排除）")
+        if not mgatk.prep_interval_list(self.runner, self.log):
+            raise RuntimeError("interval_list 准备失败")
+
+        def s5(sm):
+            slog = self.slog(sm)
+            bam_dir = os.path.join(self.work, "bam", sm)
+            bqsr_bam = os.path.join(bam_dir, f"{sm}.markdup.BQSR.bam")
+            gvcf = os.path.join(self.work, "gvcf", f"{sm}.g.vcf.gz")
+            if not mgatk.haplotypecaller(self.runner, bqsr_bam, gvcf,
+                                         self.plan.gatk_mem, self.plan.hc_hmm_threads, slog):
+                return sm, False
+            return sm, True
+
+        res = _parallel({sm: (lambda sm=sm: s5(sm)) for sm in calling}, self.plan.workers)
+        hc_ok = []
+        for sm, r in res.items():
+            if r == (sm, True):
+                hc_ok.append(sm)
+            else:
+                self.failed[sm] = "step5: HaplotypeCaller 失败"
+                self.log.error(f"{sm} HC 失败\n{r[1] if isinstance(r, tuple) else ''}")
+        if not hc_ok:
+            raise RuntimeError("全部 HaplotypeCaller 失败")
+        hc_ok = sorted(hc_ok)
+        self.bdata["samples"]["calling"] = hc_ok   # 实际进入联合分型的样本（排序）
+        self.log.result(f"HaplotypeCaller 完成 {len(hc_ok)}/{len(calling)}，进入联合分型")
+
+        # cohort 级（串行，gvcf.list 每次重新生成；dry-run 零落盘只打印命令）
+        coh = os.path.join(self.work, "cohort")
+        gvcf_list = os.path.join(coh, "gvcf.list")
+        if not self.runner.dry_run:
+            with open(gvcf_list, "w", encoding="utf-8") as f:
+                for sm in sorted(hc_ok):
+                    f.write(self.runner.cpath(os.path.join(self.work, "gvcf", f"{sm}.g.vcf.gz")) + "\n")
+            self.log.info(f"gvcf.list 重新生成: {len(hc_ok)} 个 gVCF（批次内联合，严禁跨批次）")
+        combined = os.path.join(coh, "cohort.g.vcf.gz")
+        raw_vcf = os.path.join(coh, "cohort.raw.vcf.gz")
+        if not mgatk.combine_gvcfs(self.runner, gvcf_list, combined,
+                                   self.plan.cohort_mem, self.log):
+            raise RuntimeError("CombineGVCFs 失败")
+        if not mgatk.genotype_gvcfs(self.runner, combined, raw_vcf,
+                                    self.plan.cohort_mem, self.log):
+            raise RuntimeError("GenotypeGVCFs 失败")
+        mbc.run_stats(self.runner, raw_vcf,
+                      os.path.join(self.work, "qc", "bcftools_stats", "cohort.raw.stats"), self.log)
+        self.cohort_stats["raw"] = mbc.parse_stats(
+            os.path.join(self.work, "qc", "bcftools_stats", "cohort.raw.stats"))
+
+        split_vcf = os.path.join(coh, "cohort.raw.split.vcf.gz")
+        norm_stats_json = os.path.join(coh, "norm_stats.json")
+        ok, norm_stats = mbc.norm_split(self.runner, raw_vcf, split_vcf, self.log)
+        if not ok:
+            raise RuntimeError("bcftools norm 失败")
+        if norm_stats:   # 统计落盘，SKIP 续跑时仍可报告
+            with open(norm_stats_json, "w", encoding="utf-8") as f:
+                json.dump(norm_stats, f)
+        else:
+            try:
+                with open(norm_stats_json, encoding="utf-8") as f:
+                    norm_stats = json.load(f)
+            except (OSError, ValueError):
+                norm_stats = {}
+        self.cohort_stats["norm"] = norm_stats
+        self.log.result(f"norm 摊平: {norm_stats}（后续一切靶区提取加 ±100bp padding）")
+
+        snp_v = os.path.join(coh, "cohort.snp.vcf.gz")
+        indel_v = os.path.join(coh, "cohort.indel.vcf.gz")
+        snp_f = os.path.join(coh, "cohort.snp.hardfiltered.vcf.gz")
+        indel_f = os.path.join(coh, "cohort.indel.hardfiltered.vcf.gz")
+        hard_v = os.path.join(coh, "cohort.hardfiltered.vcf.gz")
+        pass_v = os.path.join(coh, "cohort.PASS.vcf.gz")
+        if not mgatk.select_variants(self.runner, split_vcf, "SNP", snp_v,
+                                     self.plan.gatk_mem, self.log) \
+                or not mgatk.select_variants(self.runner, split_vcf, "INDEL", indel_v,
+                                             self.plan.gatk_mem, self.log):
+            raise RuntimeError("SelectVariants 失败")
+        if not mgatk.variant_filtration(self.runner, snp_v, snp_f,
+                                        config.SNP_HARD_FILTERS, self.plan.gatk_mem, self.log) \
+                or not mgatk.variant_filtration(self.runner, indel_v, indel_f,
+                                                config.INDEL_HARD_FILTERS,
+                                                self.plan.gatk_mem, self.log):
+            raise RuntimeError("VariantFiltration 失败")
+        if not mbc.concat(self.runner, [snp_f, indel_f], hard_v, self.log):
+            raise RuntimeError("bcftools concat 失败")
+        mbc.index_tbi(self.runner, hard_v, self.log)
+        filt_ok, filt_dist = mbc.filter_column_check(self.runner, hard_v, self.log)
+        if not filt_ok:
+            raise RuntimeError("FILTER 列出现 '.'——过滤漏跑，判 FAIL")
+        self.log.result(f"FILTER 标签分布: {filt_dist}")
+        if not mbc.view_pass(self.runner, hard_v, pass_v, self.log):
+            raise RuntimeError("PASS 提取失败")
+        mbc.index_tbi(self.runner, pass_v, self.log)
+
+        # 双口径导出 + stats
+        mbc.export_genotype_matrix(
+            self.runner, hard_v, os.path.join(self.work, "matrix", "genotype_matrix.tsv"), self.log)
+        mbc.export_detail_pass(
+            self.runner, pass_v, os.path.join(self.work, "matrix",
+                                             "genotype_detail_PASS.tsv"), self.log)
+        mbc.run_stats(self.runner, hard_v, os.path.join(
+            self.work, "qc", "bcftools_stats", "cohort.hardfiltered.stats"), self.log)
+        mbc.run_stats(self.runner, pass_v, os.path.join(
+            self.work, "qc", "bcftools_stats", "cohort.PASS.stats"), self.log)
+        self.cohort_stats["hardfiltered"] = mbc.parse_stats(os.path.join(
+            self.work, "qc", "bcftools_stats", "cohort.hardfiltered.stats"))
+        self.cohort_stats["PASS"] = mbc.parse_stats(os.path.join(
+            self.work, "qc", "bcftools_stats", "cohort.PASS.stats"))
+        # 每样本 hardfiltered / PASS（未裁决版，供追溯）
+        for sm in calling:
+            hf_sm = os.path.join(self.work, "per_sample_vcf", f"{sm}.hardfiltered.vcf.gz")
+            ps_sm = os.path.join(self.work, "per_sample_vcf", f"{sm}.PASS.vcf.gz")
+            mbc.split_sample(self.runner, hard_v, sm, hf_sm, self.slog(sm))
+            mbc.index_tbi(self.runner, hf_sm, self.slog(sm))
+            mbc.split_sample(self.runner, pass_v, sm, ps_sm, self.slog(sm))
+            mbc.index_tbi(self.runner, ps_sm, self.slog(sm))
+
+        tt_raw = self.cohort_stats["raw"].get("titv")
+        tt_pass = self.cohort_stats["PASS"].get("titv")
+        self.log.result(f"Ti/Tv: raw {tt_raw} → PASS {tt_pass}（应上升；panel 参考区间 2.5-3.5，"
+                   f"看趋势不看绝对值）")
+        self.step_time("step5")
+        self.bdata["artifacts"].update({
+            "cohort_PASS_vcf": pass_v,
+            "genotype_matrix": os.path.join(self.work, "matrix", "genotype_matrix.tsv"),
+            "genotype_detail_PASS": os.path.join(self.work, "matrix",
+                                                 "genotype_detail_PASS.tsv")})
+
+        # 对账·数量：矩阵行数 vs hardfiltered 限定 targets 的记录数（应一致）
+        recon_anoms = _step_anoms(self, "step5")
+        if not self.runner.dry_run:
+            matrix_n = sum(1 for _ in open(
+                os.path.join(self.work, "matrix", "genotype_matrix.tsv"), encoding="utf-8"))
+            # 同口径核对（矩阵由 query -R 生成，核对也用 -R：
+            # -R/-T 在区间边界对跨界 indel 的取舍不同，混用会有固有差额）
+            view_n_out = self.runner.out(
+                f"{self.runner.tool('bcftools', 'bcftools view -R ' + self.runner.cpath(config.TARGETS_SORTED_BED) + ' -H ' + self.runner.cpath(hard_v))} | wc -l",
+                timeout=config.STATS_TIMEOUT_S)
+            try:
+                view_n = int(view_n_out.strip().split()[-1])
+            except (ValueError, IndexError):
+                view_n = None
+            self.log.result(f"对账·数量: 矩阵 {matrix_n} 行 vs view -R 计数 {view_n}")
+            if view_n is not None and matrix_n != view_n:
+                recon_anoms.append(("P1", f"对账·数量：矩阵行数 {matrix_n} ≠ 靶区记录数 "
+                                          f"{view_n}（导出可能不完整）"))
+            # 对账·新鲜度：关键 VCF mtime < 本次启动（断点续跑复用旧产物）
+            stale = []
+            for key_vcf in [pass_v, hard_v]:
+                if nonempty(key_vcf) and os.path.getmtime(key_vcf) < self.started:
+                    stale.append(os.path.basename(key_vcf))
+            adj_all = sorted(glob.glob(os.path.join(
+                self.work, "per_sample_vcf", "*.PASS.adjudicated.vcf.gz")))
+            if adj_all and all(os.path.getmtime(p) < self.started for p in adj_all):
+                stale.append("每样本裁决VCF×" + str(len(adj_all)))
+            if stale:
+                recon_anoms.append(("P1", "对账·新鲜度：" + ", ".join(stale)
+                                    + " 为历史运行产物（断点续跑复用）"))
+
+        _step_notify(self.notify_on, self.batch, 5, "变异检测", self.log,
+                     samples=f"gVCF {len(hc_ok)}/{len(calling)} | 联合分型样本 {len(hc_ok)}",
+                     metrics=f"raw {self.cohort_stats['raw'].get('records')} → PASS "
+                             f"{self.cohort_stats['PASS'].get('records')} | "
+                             f"SNP/INDEL PASS {self.cohort_stats['PASS'].get('snps')}/"
+                             f"{self.cohort_stats['PASS'].get('indels')} | "
+                             f"Ti/Tv {tt_raw}→{tt_pass} | "
+                             f"norm split/realigned {norm_stats.get('split')}/"
+                             f"{norm_stats.get('realigned')}",
+                     anomalies=recon_anoms,
+                     artifacts=f"cohort/cohort.PASS.vcf.gz "
+                               + alerts.artifact_summary(os.path.join(self.work, "cohort", "*.vcf.gz")),
+                     log_hint=f"tail -f {self.work}/logs/pipeline_*.self.log")
+
+
+    # ── step6_summary_delivery ──
+    def step6_summary_delivery(self):
+        """Step 6：mosdepth×2 + HsMetrics → 矩阵 ./. 裁决 + 每样本 PASS 重建
+        → MultiQC 最终报告（全部流程结束后）→ 交付导出 Output/（DEC-02）。"""
+        self._t0 = time.time()
+        self.log.step("Step 6: mosdepth ×2 + HsMetrics + 矩阵裁决 + MultiQC")
+
+        def s6(sm):
+            slog = self.slog(sm)
+            bam_dir = os.path.join(self.work, "bam", sm)
+            md_bam = os.path.join(bam_dir, f"{sm}.markdup.bam")
+            bqsr_bam = os.path.join(bam_dir, f"{sm}.markdup.BQSR.bam")
+            ms = {}
+            for tag, bam in (("md", md_bam), ("bqsr", bqsr_bam)):
+                prefix = os.path.join(self.work, "qc", "mosdepth", f"{sm}.{tag}")
+                if not mmos.run_mosdepth(self.runner, bam, prefix,
+                                         self.plan.mosdepth_threads, slog):
+                    slog.warn(f"mosdepth({tag}) 失败（不阻断）")
+                    continue
+                summ = mmos.parse_summary(prefix)
+                ms[tag] = summ["mean"]
+                slog.result(f"mosdepth[{tag}] 靶区均值={ms[tag]}×")
+            hs_txt = os.path.join(self.work, "qc", "hsmetrics", f"{sm}.hs_metrics.txt")
+            if not mgatk.collect_hsmetrics(self.runner, bqsr_bam, hs_txt,
+                                           self.plan.gatk_mem, slog):
+                return sm, False, (ms, None)
+            hs = mgatk.parse_hsmetrics(hs_txt)
+            mgatk.qc_hsmetrics(hs, slog, control=sm in self.excluded)
+            return sm, True, (ms, hs)
+
+        res = _parallel({sm: (lambda sm=sm: s6(sm)) for sm in self.merged
+                         if sm not in self.failed}, self.plan.workers)
+        for sm, r in res.items():
+            if isinstance(r, tuple) and len(r) == 3:
+                _, ok, (ms, hs) = r
+                self.metrics.setdefault("mosdepth_mean", {})[sm] = ms.get("bqsr")
+                if hs:
+                    self.metrics.setdefault("mean_target_coverage", {})[sm] = \
+                        hs.get("MEAN_TARGET_COVERAGE")
+                    self.metrics.setdefault("pct_20x", {})[sm] = \
+                        round((hs.get("PCT_TARGET_BASES_20X") or 0) * 100, 2)
+                    self.metrics.setdefault("on_target_pct", {})[sm] = \
+                        hs.get("ON_TARGET_PCT")
+                if not ok:
+                    self.failed[sm] = "step6: HsMetrics 失败"
+            else:
+                self.failed[sm] = f"step6 异常: {r}"
+
+        # 矩阵 ./. 裁决（mosdepth bqsr regions，DP≥20 改判 0/0）+ 每样本 PASS 重建
+        calling = sorted(self.bdata["samples"].get("calling") or
+                         [sm for sm in self.merged if sm not in self.failed])
+        adj_tsv = os.path.join(self.work, "matrix", "genotype_matrix.adjudicated.tsv")
+        adj_stats = None
+        if calling and self.cohort_stats and not self.runner.dry_run:
+            regions_cache = {}
+            for sm in calling:
+                prefix = os.path.join(self.work, "qc", "mosdepth", f"{sm}.bqsr")
+                regions_cache[sm] = mmos.load_regions(prefix)
+
+            def region_of(sm, chrom, pos):
+                return mmos.region_depth(regions_cache.get(sm, []), chrom, pos)
+
+            matrix = os.path.join(self.work, "matrix", "genotype_matrix.tsv")
+            out_lines, adj_stats = mbc.adjudicate_matrix(matrix, region_of, calling,
+                                                     config.DP_MIN)
+            with open(adj_tsv, "w", encoding="utf-8") as f:
+                f.write("\n".join(out_lines) + "\n")
+            self.log.result(f"矩阵 ./. 裁决: 总 ./. {adj_stats['dotdot_total']} → "
+                       f"改判 0/0 {adj_stats['filled_00']} · 保留 ./. "
+                       f"{adj_stats['kept_dotdot']}（DP_MIN={config.DP_MIN}）")
+            self.bdata["artifacts"]["genotype_matrix_adjudicated"] = adj_tsv
+
+            # 每样本 PASS VCF 重建（bcftools view -s 拆分 + GT 替换，其余字段原样保留）
+            pass_v = os.path.join(self.work, "cohort", "cohort.PASS.vcf.gz")
+            adj_vcfs = {}
+            import tempfile
+            import shlex as _shlex
+            for sm in calling:
+                slog = self.slog(sm)
+                out_vcf = os.path.join(self.work, "per_sample_vcf",
+                                       f"{sm}.PASS.adjudicated.vcf.gz")
+                if nonempty(out_vcf) and nonempty(out_vcf + ".tbi"):
+                    adj_vcfs[sm] = out_vcf
+                    continue
+                with tempfile.TemporaryDirectory() as td:
+                    raw_plain = os.path.join(td, f"{sm}.raw.vcf")
+                    gt_tsv = os.path.join(td, f"{sm}.gt.tsv")
+                    adj_plain = os.path.join(td, f"{sm}.adj.vcf")
+                    rc = self.runner.run(
+                        f"{self.runner.tool('bcftools', 'bcftools view -s ' + _shlex.quote(sm) + ' --min-ac 0 ' + self.runner.cpath(pass_v))} > {raw_plain}",
+                        logger=slog)
+                    if rc != 0:
                         continue
-                    with tempfile.TemporaryDirectory() as td:
-                        raw_plain = os.path.join(td, f"{sm}.raw.vcf")
-                        gt_tsv = os.path.join(td, f"{sm}.gt.tsv")
-                        adj_plain = os.path.join(td, f"{sm}.adj.vcf")
-                        rc = ctx.runner.run(
-                            f"{ctx.runner.tool('bcftools', 'bcftools view -s ' + _shlex.quote(sm) + ' --min-ac 0 ' + ctx.runner.cpath(pass_v))} > {raw_plain}",
-                            logger=slog)
-                        if rc != 0:
-                            continue
-                        with open(adj_tsv, encoding="utf-8") as fa, \
-                                open(gt_tsv, "w", encoding="utf-8") as fo:
-                            idx = calling.index(sm) + 4
-                            for line in fa:
-                                p = line.rstrip("\n").split("\t")
-                                if len(p) > idx:
-                                    fo.write("\t".join([p[0], p[1], p[idx]]) + "\n")
-                        st = mbc.rebuild_sample_vcf(raw_plain, gt_tsv, adj_plain, sm)
-                        slog.result(f"重建 {sm}: 记录 {st['records']} GT已改 {st['gt_changed']}")
-                        rc = ctx.runner.run(
-                            f"{ctx.runner.tool('bcftools', 'bcftools view -Oz -o ' + ctx.runner.cpath(out_vcf) + ' ' + adj_plain)} "
-                            f"&& {ctx.runner.tool('bcftools', 'bcftools index -t ' + ctx.runner.cpath(out_vcf))}",
-                            logger=slog, outputs=[out_vcf])
-                        if rc == 0:
-                            adj_vcfs[sm] = out_vcf
-                bdata["artifacts"]["per_sample_adjudicated_dir"] = \
-                    os.path.join(work, "per_sample_vcf")
-                bdata["_adj_vcfs"] = adj_vcfs
-            elif ctx.runner.dry_run:
-                log.info("[DRY-RUN] 跳过裁决与每样本 VCF 重建的实际计算")
+                    with open(adj_tsv, encoding="utf-8") as fa, \
+                            open(gt_tsv, "w", encoding="utf-8") as fo:
+                        idx = calling.index(sm) + 4
+                        for line in fa:
+                            p = line.rstrip("\n").split("\t")
+                            if len(p) > idx:
+                                fo.write("\t".join([p[0], p[1], p[idx]]) + "\n")
+                    st = mbc.rebuild_sample_vcf(raw_plain, gt_tsv, adj_plain, sm)
+                    slog.result(f"重建 {sm}: 记录 {st['records']} GT已改 {st['gt_changed']}")
+                    rc = self.runner.run(
+                        f"{self.runner.tool('bcftools', 'bcftools view -Oz -o ' + self.runner.cpath(out_vcf) + ' ' + adj_plain)} "
+                        f"&& {self.runner.tool('bcftools', 'bcftools index -t ' + self.runner.cpath(out_vcf))}",
+                        logger=slog, outputs=[out_vcf])
+                    if rc == 0:
+                        adj_vcfs[sm] = out_vcf
+            self.bdata["artifacts"]["per_sample_adjudicated_dir"] = \
+                os.path.join(self.work, "per_sample_vcf")
+            self.bdata["_adj_vcfs"] = adj_vcfs
+        elif self.runner.dry_run:
+            self.log.info("[DRY-RUN] 跳过裁决与每样本 VCF 重建的实际计算")
 
-            # MultiQC（串行）：其他全部流程结束、qc/ 产物生成完全后，
-            # 才生成最终汇总报告（fastqc/fastp/比对/去重/BQSR/覆盖度全量输入）
-            if not ctx.runner.dry_run:
-                mmultiqc.run_multiqc(ctx.runner, os.path.join(work, "qc"),
-                                     os.path.join(work, "qc", "multiqc"), log)
-                mq = sorted(glob.glob(os.path.join(work, "qc", "multiqc",
-                                                   "*multiqc_report.html")))
-                if mq:
-                    bdata["artifacts"]["multiqc"] = mq[-1]
+        # MultiQC（串行）：其他全部流程结束、qc/ 产物生成完全后，
+        # 才生成最终汇总报告（fastqc/fastp/比对/去重/BQSR/覆盖度全量输入）
+        if not self.runner.dry_run:
+            mmultiqc.run_multiqc(self.runner, os.path.join(self.work, "qc"),
+                                 os.path.join(self.work, "qc", "multiqc"), self.log)
+            mq = sorted(glob.glob(os.path.join(self.work, "qc", "multiqc",
+                                               "*multiqc_report.html")))
+            if mq:
+                self.bdata["artifacts"]["multiqc"] = mq[-1]
 
-                # 交付导出：独立 Output/<批次>_<日期>/
-                # （VCF+tbi+MultiQC 报告+md5sum+MANIFEST，幂等；裁决未产出则不导出）
-                if bdata.get("_adj_vcfs"):
-                    delivery_dir = export_delivery(
-                        ctx.runner, f"{batch}_{run_date}", bdata["_adj_vcfs"], log,
-                        batch_note=f"｜批次 {batch}",
-                        extra_files=(bdata["artifacts"]["multiqc"],)
-                        if bdata["artifacts"].get("multiqc") else ())
-                    if delivery_dir:
-                        bdata["artifacts"]["delivery_dir"] = delivery_dir
-            step_time("step6")
+            # 交付导出：独立 Output/<批次>_<日期>/
+            # （VCF+tbi+MultiQC 报告+md5sum+MANIFEST，幂等；裁决未产出则不导出）
+            if self.bdata.get("_adj_vcfs"):
+                delivery_dir = export_delivery(
+                    self.runner, f"{self.batch}_{self.run_date}", self.bdata["_adj_vcfs"], self.log,
+                    batch_note=f"｜批次 {self.batch}",
+                    extra_files=(self.bdata["artifacts"]["multiqc"],)
+                    if self.bdata["artifacts"].get("multiqc") else ())
+                if delivery_dir:
+                    self.bdata["artifacts"]["delivery_dir"] = delivery_dir
+        self.step_time("step6")
 
-            # Step6 里程碑：捕获效率 / 覆盖达标 / 结论口径 / NTC 污染
-            cells = adj_stats.get("cells_total") if adj_stats else None
-            call_rate = None
-            if adj_stats and cells:
-                call_rate = round((cells - adj_stats["kept_dotdot"]) * 100.0 / cells, 2)
-            ntc_depth = (ctx.metrics.get("mosdepth_mean") or {}).get("NTC") \
-                if excluded else None
-            _step_notify(notify_on, batch, 6, "质量汇总", log,
-                         samples=f"{len(merged) - len(ctx.failed)}/{len(merged)} 成功 | "
-                                 f"裁决 {len(bdata.get('_adj_vcfs') or {})} 样本",
-                         metrics=f"mean depth {_avg(ctx.metrics.get('mean_target_coverage'))}× | "
-                                 f"20X {_avg(ctx.metrics.get('pct_20x'))}% | "
-                                 f"on-target {_avg(ctx.metrics.get('on_target_pct'))}% | "
-                                 f"call rate {call_rate}% | "
-                                 f"Ti/Tv PASS {cohort_stats.get('PASS', {}).get('titv')}"
-                                 + (f" | NTC 深度 {ntc_depth}×" if ntc_depth is not None else ""),
-                         anomalies=_step_anoms(ctx, "step6")
-                                   + alerts.check_capture(
-                                       ctx.metrics.get("mean_target_coverage"),
-                                       ctx.metrics.get("pct_20x"),
-                                       ctx.metrics.get("on_target_pct"))
-                                   + alerts.check_variantqc(
-                                       cohort_stats.get("PASS", {}).get("titv"), call_rate)
-                                   + alerts.check_ntc(ntc_depth),
-                         artifacts=f"MultiQC + 裁决VCF "
-                                   + alerts.artifact_summary(os.path.join(
-                                       work, "per_sample_vcf", "*.PASS.adjudicated.vcf.gz")),
-                         log_hint=f"tail -f {work}/logs/sample_<样本>.log")
+        # Step6 里程碑：捕获效率 / 覆盖达标 / 结论口径 / NTC 污染
+        cells = adj_stats.get("cells_total") if adj_stats else None
+        call_rate = None
+        if adj_stats and cells:
+            call_rate = round((cells - adj_stats["kept_dotdot"]) * 100.0 / cells, 2)
+        ntc_depth = (self.metrics.get("mosdepth_mean") or {}).get("NTC") \
+            if self.excluded else None
+        _step_notify(self.notify_on, self.batch, 6, "质量汇总", self.log,
+                     samples=f"{len(self.merged) - len(self.failed)}/{len(self.merged)} 成功 | "
+                             f"裁决 {len(self.bdata.get('_adj_vcfs') or {})} 样本",
+                     metrics=f"mean depth {_avg(self.metrics.get('mean_target_coverage'))}× | "
+                             f"20X {_avg(self.metrics.get('pct_20x'))}% | "
+                             f"on-target {_avg(self.metrics.get('on_target_pct'))}% | "
+                             f"call rate {call_rate}% | "
+                             f"Ti/Tv PASS {self.cohort_stats.get('PASS', {}).get('titv')}"
+                             + (f" | NTC 深度 {ntc_depth}×" if ntc_depth is not None else ""),
+                     anomalies=_step_anoms(self, "step6")
+                               + alerts.check_capture(
+                                   self.metrics.get("mean_target_coverage"),
+                                   self.metrics.get("pct_20x"),
+                                   self.metrics.get("on_target_pct"))
+                               + alerts.check_variantqc(
+                                   self.cohort_stats.get("PASS", {}).get("titv"), call_rate)
+                               + alerts.check_ntc(ntc_depth),
+                     artifacts=f"MultiQC + 裁决VCF "
+                               + alerts.artifact_summary(os.path.join(
+                                   self.work, "per_sample_vcf", "*.PASS.adjudicated.vcf.gz")),
+                     log_hint=f"tail -f {self.work}/logs/sample_<样本>.self.log")
+
+
+
+def process_batch(batch, batch_dir, args, plan, main_logger, run_date=""):
+    """单批次全流程编排。返回批次结果 dict（status: success/failed/skipped）。
+    输出目录 results/<批次>_<执行日期>/（多次运行隔离；同日重跑同目录幂等续跑）。
+    各步骤实现拆分为 BatchCtx.step0~step6 方法（v2.7.0，原为单函数 ~700 行）"""
+    work = args.out if args.out else config.batch_result_dir(batch, run_date)
+    ctx = BatchCtx(batch, batch_dir, work, args, plan, main_logger)
+    log = ctx.log
+    ctx.bdata = {"status": "skipped", "batch_dir": batch_dir, "work_dir": work,
+                 "samples": {"valid": [], "invalid": {}, "calling": []},
+                 "steps": {}, "metrics": {}, "artifacts": {},
+                 "error": None}
+    ctx.notify_on = args.notify == "on" and not args.dry_run
+    ctx.run_date = run_date
+    bdata = ctx.bdata
+
+    try:
+        log.step(f"═══ 批次 {batch} 启动（{batch_dir} → {work}）═══")
+        ctx.makedirs()
+
+        early = ctx.step0_scan()          # 无有效样本 → 返回 bdata（批次 skipped）
+        if early is not None:
+            return early
+        if args.step >= 1:
+            ctx.step1_qc_trim()
+        if args.step >= 2:
+            ctx.step2_align()
+        if args.step >= 3:
+            ctx.step3_markdup()
+        if args.step >= 4:
+            ctx.step4_bqsr()
+        if args.step >= 5:
+            ctx.step5_variant_calling()
+        if args.step >= 6:
+            ctx.step6_summary_delivery()
 
         # ── 汇总 ──
+        merged, cohort_stats = ctx.merged, ctx.cohort_stats
+        notify_on = ctx.notify_on
         bdata["status"] = "failed" if ctx.failed and len(ctx.failed) >= len(merged) \
             else ("success" if not ctx.failed else "partial")
         bdata["failed_samples"] = dict(ctx.failed)
@@ -974,7 +1035,8 @@ def export_delivery(runner, batch, adj_vcfs, log, batch_note="", extra_files=())
                 f"每样本 VCF（仅替换 GT，其余字段原样保留）\n"
                 f"- 校验：`md5sum -c md5sum.txt`；明细见 MANIFEST.tsv"
                 f"（样本/文件/大小/md5/记录数/来源）\n"
-                f"- 生成流程版本：{config.WORK_DIR}/pipeline（README 含完整口径与差异记录）\n")
+                f"- 生成流程：GWAS pipeline v{config.PIPELINE_VERSION}"
+                f"（{config.WORK_DIR}/pipeline，README 含完整口径与差异记录）\n")
     log.result(f"[交付] {dbatch}: VCF ×{n_vcf} + md5sum.txt + MANIFEST.tsv"
                + (f" + 附件 ×{len(extra_names)}" if extra_names else "")
                + ("（README 更新）" if have else ""))
@@ -1147,6 +1209,7 @@ def main():
 
     summary = {
         "run": {"timestamp": ts, "argv": " ".join(sys.argv),
+                "pipeline_version": config.PIPELINE_VERSION,
                 "host": os.uname().nodename,
                 "user": os.environ.get("USER", ""),
                 "work_dir": config.WORK_DIR, "dry_run": args.dry_run,

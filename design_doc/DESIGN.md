@@ -3,7 +3,7 @@
 ```yaml
 # ---- design-meta（机器可解析锚点，勿手改格式；版本规则见 §0）----
 doc: GWAS-pipeline-design
-version: 2.6.0
+version: 2.7.0
 updated: 2026-09-16
 owner_human: gewenlong
 owner_machine: ZCode(GLM)
@@ -79,7 +79,7 @@ $WORK/
 ├── singularity/       容器镜像目录（pipeline 同级，固定位置，不走 .env）
 └── pipeline/
     ├── .env               环境参数文件（DEC-18；钉钉 webhook 等密钥只存于此，.env.example 为模板）
-    ├── run_pipeline.py   主控：CLI/编排/样本级并行/汇总/通知触发/交付导出
+    ├── run_pipeline.py   主控：CLI/编排（process_batch→BatchCtx.step0~6 步骤方法）/样本级并行/汇总/通知/交付导出
     ├── config.py         ★ 阈值与路径唯一实现源（TH 表镜像于此；启动时加载 .env）
     ├── logger.py         双通道日志 + capture_stdio tee
     ├── runner.py         容器命令封装：幂等 SKIP/实时输出/超时 Timer kill/返回码/产物校验
@@ -114,6 +114,8 @@ $WORK/
 | DEC-15 | on-target P1 阈值 60%→8% | 60% 误用了宽口径，小 panel 正常 on-target≈8-10%（笔记 5-5；用户 v2.0.0 决定） |
 | DEC-16 | 容器运行时在 Runner 初始化时自解析为**绝对路径**（shutil.which → 标准目录探测），且子进程 PATH 兜底补齐标准系统目录——不依赖调用方 PATH 完整性 | 实测：从 PATH 受限环境（PATH=/usr/bin:/bin，IDE 面板/精简 env 类）启动曾致 `singularity: not found` exit=127（RUN-22）；singularity 实装于 /usr/local/bin/singularity |
 | DEC-17 | **流程只在宿主 Python 运行**：main() 启动卫兵检测 /.singularity.d 或 SINGULARITY_* 环境变量，容器内运行立即退出并指引用 /usr/bin/python3；本机 `python` 是容器别名（mamba 解释器），嵌套容器既看不到宿主 singularity、时区还是 UTC | RUN-22/23：alias python 嵌套运行全部 127；流程纯标准库无需 mamba/conda |
+| DEC-19 | **样本名白名单阻断**：含 `[A-Za-z0-9_.-]` 外字符的样本名判无效跳过（与 R1/R2 不匹配同级），置于"无有效样本"早退之前；启动通知保留剔除清单 | 样本名进入 shell 命令拼接与 bwa @RG 头，非常规字符属注入面——此前仅 P1 告警照常处理（RUN-31，用户采纳 H1 建议） |
+| DEC-20 | **process_batch 步骤方法化**：Step 0-6 拆为 BatchCtx.step0_scan~step6_summary_delivery 七个方法，process_batch 仅编排（~40 行）；跨步骤状态挂 ctx（merged/excluded/cohort_stats/bdata 等）；MultiQC 时序锚随之锚定 step6 方法源码 | 原单函数 ~700 行难读难测；拆分后 95 用例全绿 + 真实批次 --step 0 冒烟验证（RUN-31，用户采纳 M3 建议） |
 | DEC-18 | **环境参数去硬编码，统一 .env**：钉钉 webhook（含 access_token）等环境参数只存 `pipeline/.env`（与代码同目录；模板 .env.example；`GWAS_ENV_FILE` 可改址），config.py 启动时解析并入（setdefault），三源优先级=进程环境变量 > .env > 内置默认；webhook 未配置→通知静默跳过（启动 WARN + 首次发送返回配置指引）；`singularity/` 镜像目录仍为 pipeline 同级目录约定，不走 .env | 用户要求（RUN-26）：密钥硬编码在代码里会随代码分发泄露且换环境必改源码；.env 权限 600 |
 
 ## 5. 统一口径与阈值总表（TH = config.py 镜像）<!-- HUMAN 可改值；MACHINE 同步 config 后过校验 -->
@@ -207,6 +209,8 @@ $WORK/
 | 2.5.0 | 2026-09-16 | 机 | ① norm_split 的 norm 命令 outputs 去 .tbi（该索引由后续 index 命令生成，混入检查必误报"产物缺失"）；② 对账 RESULT 文案 view -T→-R（命令本身已是 -R，DEC-11，文案过时误导排查）；③ send_markdown 成功时 logger.info 落一行"钉钉已发送: 标题"（此前 notify=on 但日志零通知痕迹）；④ INDEX.md 改累积合并（write_delivery_index：扫描 Output/ 全部历史交付目录 ∪ 本次运行；曾整体重写致历史交付 260422_20260914 从索引消失）并即时重生成找回；测试 89→92（norm outputs 口径/发送成功日志/索引累积锚）；tests+check_design 全绿；dry-run 零落盘复验（RUN-29） |
 | 2.6.0 | 2026-09-16 | 人 | design_doc 移入 pipeline/ 随仓库管理（PROMPT 与内部版 README_pipeline 不入库）；仓库增加 GitHub Actions CI |
 | 2.6.0 | 2026-09-16 | 机 | design_doc/ 迁至 pipeline/ 内（DESIGN/notes_code_reference/RUN_HISTORY 入库；PROMPT_GWAS_pipeline.md 含 webhook token、README_pipeline.md 自我声明不对外——两者进 .gitignore）；check_design 路径改为 pipeline 内相对（克隆仓库即可全绿跑 run_tests.sh）；新增 .github/workflows/ci.yml（py3.10/3.12 矩阵跑 run_tests.sh）；测试 CI 兼容化：rt 解析用例自包含（临时 PATH 植入假运行时，无 singularity 环境可验）、两个端到端 dry-run 用例加 --resource-profile low（CI runner 内存 ~16G < auto 档单样本峰值 19.8G 会快速失败）；CI 首跑失败修复：GWAS_REFERENCE_DIR/GWAS_SIF_DIR 可重定向（默认不变），E2E dry-run 用例经 _dep_env 自备哑依赖树——开跑前 P0 依赖缺失快速失败是实跑语义，予以保留；干净克隆模拟 CI 复验全绿。92 tests+check_design 全绿（RUN-30） |
+| 2.7.0 | 2026-09-16 | 人 | 五项修改：样本名白名单阻断（H1）；process_batch 拆 Step 独立方法（M3）；PIPELINE_VERSION+--version 入 run_summary/交付 README（M4）；统计类命令统一超时（M5）；仓库改 MIT 协议 |
+| 2.7.0 | 2026-09-16 | 机 | DEC-19：样本名非常规字符判无效跳过（E2E 锚）；DEC-20：Step 0-6 拆 BatchCtx 方法（跨步骤状态挂 ctx，MultiQC 时序锚改锚 step6 方法）；config.PIPELINE_VERSION=2.7.0 与 DESIGN 同步（check_design 增校验）+ CLI --version + run_summary.run.pipeline_version + 交付 README 版本行；STATS_TIMEOUT_S=600 统一作用于 flagstat/stats/count_records/query_lines/对账（runner.out 支持 timeout 透传，GATK/bwa 长任务仍无超时）；LICENSE（MIT）；测试 92→95（白名单 E2E 锚/--version/timeout 传递）；真实批次 dry-run+--step 0 冒烟 success（RUN-31） |
 
 ## 9. 证据索引 <!-- MACHINE -->
 

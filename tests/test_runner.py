@@ -102,5 +102,37 @@ class TestRunner(unittest.TestCase):
         self.assertEqual(self.r.out("echo yo").strip(), "yo")
 
 
+class TestStatsTimeout(unittest.TestCase):
+    """统计类命令统一超时（RUN-31）：flagstat/stats/count_records 等秒级查询
+    挂死不再无限阻塞批次（GATK/bwa 长任务仍不设超时）"""
+
+    def test_stats_commands_pass_timeout(self):
+        from modules import samtools as msam
+        from modules import bcftools as mbc
+        calls = []
+
+        class _Runner:
+            def tool(self, k, a):
+                return a
+
+            def cpath(self, p):
+                return p
+
+            def run(self, cmd, logger=None, outputs=(), capture=False, timeout=None):
+                calls.append(("run", timeout))
+                return (0, "1", "") if capture else 0
+
+            def out(self, cmd, logger=None, timeout=None):
+                calls.append(("out", timeout))
+                return "1"
+
+        msam.run_flagstat(_Runner(), "a.bam", "a.flagstat", None)
+        msam.run_stats(_Runner(), "a.bam", "a.stats", None)
+        mbc.run_stats(_Runner(), "a.vcf.gz", "a.stats", None)
+        mbc.count_records(_Runner(), "a.vcf.gz")
+        self.assertEqual([tv for _, tv in calls],
+                         [config.STATS_TIMEOUT_S] * 4)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -73,9 +73,13 @@ def main():
         if len(cols) >= 3 and cols[0].startswith("REQ-") and not cols[2]:
             errors.append(f"{cols[0]}: 需求已提出但状态列为空（机器实现后须回写 §2 状态与证据）")
 
-    # ④ 版本锚点存在
-    if not re.search(r"^version:\s*\d+\.\d+\.\d+", text, re.MULTILINE):
+    # ④ 版本锚点存在 + 与 config.PIPELINE_VERSION 同步（交付/run_summary 溯源依赖）
+    m_ver = re.search(r"^version:\s*(\d+\.\d+\.\d+)", text, re.MULTILINE)
+    if not m_ver:
         errors.append("design-meta 缺少 version 字段（人机共写协议要求）")
+    elif m_ver.group(1) != config.PIPELINE_VERSION:
+        errors.append(f"版本漂移：DESIGN.md version={m_ver.group(1)} ≠ "
+                      f"config.PIPELINE_VERSION={config.PIPELINE_VERSION}（须两处同步）")
 
     for w in warnings:
         print(f"[WARN] {w}")
