@@ -6,8 +6,8 @@ Python3 **仅标准库**；所有生信工具经 singularity(apptainer) 容器�
 通用、模块化、可断点续跑、资源自适应（16 线程/20G ～ 100 线程/900G 及以上）、带钉钉机器人通知。
 
 命令与参数以思源笔记《下机数据流程》0-5 为准（备查手册
-`$WORK/design_doc/notes_code_reference.md`，已回查笔记原文核对一致）；
-工程化约定以 `design_doc/DESIGN.md` 为准（`PROMPT_GWAS_pipeline.md` 为历史提示词）。
+`design_doc/notes_code_reference.md`，已回查笔记原文核对一致）；
+工程化约定以 `design_doc/DESIGN.md` 为准（`PROMPT_GWAS_pipeline.md` 为历史提示词，不入仓库）。
 
 ---
 
@@ -188,7 +188,7 @@ auto 档超过 100 线程/900G 照常使用（不设人为上限），只扣系�
 **低配边界（要点）**：bwa-mem2 人类索引常驻 17G，mmap 之外运行时+缓存开销实测
 ≈2-4G；cgroup 硬上限场景实测下限约 24-26G，裸机 20G 属临界（依赖内核对 mmap
 干净页的回收）。规划器对"单样本峰值 > 可用内存"的机器启动即快速失败，防跑一半
-OOM。完整实测记录（复现命令与数据）存服务器 `design_doc/`，不入本仓库。
+OOM。完整实测记录（复现命令与数据）见 `design_doc/RUN_HISTORY.md`（本仓库）。
 
 ## 6. 钉钉通知（分级告警 + 全步骤里程碑）
 

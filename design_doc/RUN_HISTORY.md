@@ -1,0 +1,58 @@
+# 运行结果台账（RUN_HISTORY）<!-- MACHINE 回写区；人可用 >> 行批注 -->
+
+> 每轮一次真实执行记一行（失败轮也记——失败原因与修复是防漂移的核心证据）。
+> 时间为运行开始时刻；"证据"列为主要产物/日志路径（相对 $WORK）。
+
+## 一、总览 <!-- MACHINE -->
+
+- 累计 30 轮（RUN-01~30），其中失败调试轮 7（R01/R02/R03/R04/R06/R11/R12/R22 前半段中计为 7 个失败轮次）、
+  成功验收轮含最终交付链 R05→R08→R15→R19→R20，变更回归轮 R21（v2.0.0）、R22/23（v2.0.1/2）、R24（v2.1.0）、R25（v2.1.1）、R26（v2.2.0）、R27（v2.3.0）、R28（v2.4.0 文档清理）、R29（v2.5.0 日志分析修复）、R30（v2.6.0 仓库工程化）。
+- 关键修复链：binds 遮蔽 → sort -m 格式 → norm 索引 → GT 列序互换 → cgroup 资源边界 →
+  对账口径 → 2 个测试集抓出的潜伏 bug。
+
+## 二、逐轮台账 <!-- MACHINE -->
+
+| 轮次 | 时间 | 输入/命令 | 结果 | 关键发现/修复 | 证据 |
+| --- | --- | --- | --- | --- | --- |
+| RUN-01 | 09-14 00:43 | --batch 260422（冒烟首跑） | ❌ Step1 失败 | runner.tool() binds 变量遮蔽致 ValueError；重命名 bind_args 修复 | results_smoke.log（历史） |
+| RUN-02 | 09-14 00:52 | --batch 260422（重启） | ❌ Step2 失败 | Step0/1 幂等 SKIP 首证；`samtools sort -m 2.0G` 被解析为 2 字节 → 规划器统一整数 MB（TH-27/28） | 同上；DEC-03 |
+| RUN-03 | 09-14 01:21 | --batch 260422 | ❌ SelectVariants 失败 | norm 产物缺 .tbi（GATK 需索引）；norm 后自动 index 且纳入幂等检查 | 同上 |
+| RUN-04 | 09-14 01:27 | --batch 260422 | ❌ Step6 失败 | adjudicate_matrix 前缀漏改 NameError（5 分钟修） | 同上 |
+| RUN-05 | 09-14 01:33 | --batch 260422（冒烟首跑） | ✅ 首次全流程成功 | 深度 93.5×/105×；`./.` 裁决 90→62 | results/260422/（历史轮） |
+| RUN-06 | 09-14 01:39 | --input 0_raw_data（全量首跑） | ❌ 启动即失败 | 相对路径按 cwd 解析不存在 → 改按 $WORK 解析 | results_full.log（历史） |
+| RUN-07 | 09-14 01:41-03:03 | --input 0_raw_data 四批次 | ✅ 四批 success | **GT 列互换 bug**：两样本基因型对调（GT 0/0 但 AD 全 alt 为铁证）；20260720 raw=17090 与笔记一致 | results_full.log |
+| RUN-08 | 09-14 04:12 | --input 0_raw_data（修复 sorted 后重跑） | ✅ 四批 success | 样本列序全链 sorted 修复 GT 列互换（DEC-05） | results_full2.log |
+| RUN-09 | 09-14 04:22 | --batch 251016（删 NA12878 gVCF+cohort 链重跑） | ✅ 断点续跑验证 | 31 处 [SKIP]，仅补算 HC+cohort+裁决+比对；结果与删除前逐字一致（99.355/99.318） | results_resume.log |
+| RUN-10 | 09-14 04:29 | systemd-run 20GiB（CPUQuota 未生效） | ❌ 快速失败触发 | 探测 104 核 → 峰值 22G>21.5G → SystemExit（REQ-03 快速失败实证） | results_lowtest.log（历史） |
+| RUN-11 | 09-14 04:30 | taskset 16 核 + MemoryMax 20GiB | ❌ bwa OOM-kill | 计划正确（workers=1/T=4/128M/1g）但 20GiB 硬上限装不下索引+运行时+缓存（DEC-03 边界） | 同上 |
+| RUN-12 | 09-14 04:56 | 24GiB（旧 sort 分配 1229M×4） | ❌ bwa OOM-kill | sort 吃满预算导致超限 → 改为剩余预算×0.25 | 同上 |
+| RUN-13 | 09-14 05:20 | 32GiB 测量轮 | ✅ RC=0 | cgroup memory.peak=25.59GB、oom_kill=0（含可回收页缓存） | /tmp 测量脚本输出 |
+| RUN-14 | 09-14 05:39 | 24GiB（新 sort 分配）单样本 Step0-2 | ✅ EXIT=0 | mapped 100%、properly paired 98.2%、全程无 OOM（限资源验收通过） | results_lowtest/ |
+| RUN-15 | 09-14 06:10 | --input 0_raw_data（最终全量再验证） | ✅ 四批 success | 日志 0 ERROR；规范 run_summary 重生成；多批次汇总 | results/logs/run_20260914_061031.log（历史路径） |
+| RUN-16 | 09-14 17:36 | --batch 260422 | ✅ | 日志 tee 自动落盘验证（150 行无重复）；新通知结构 8 类全部送达（0 失败告警） | results/logs/run_20260914_173622.log |
+| RUN-17 | 09-14 17:39 | --input 0_raw_data --notify off | ✅ | 单批次不再覆盖全局 summary 验证（DEC-10） | （历史轮） |
+| RUN-18 | 09-14 18:01 | 交付导出（单批+全量） | ✅ | delivery/ 四批次+INDEX；md5sum -c 全过；幂等 mtime 保留 | delivery/ |
+| RUN-19 | 09-14 18:09-19:23 | **--input 0_raw_data_test**（日期目录命名改造后最终测试） | ✅ 两批 success | results/260422_20260914/（1662s）、results/260529_20260914/（2733s）；对账·数量暴露 -R/-T 口径差（7399 vs 7390）→ 改同口径 -R（DEC-11）；交付 delivery/<批次>_20260914/ | test_run.log；results/<批次>_20260914/ |
+| RUN-20 | 09-14 22:5x | ./run_tests.sh（测试集） | ✅ 75/75 | 抓出并修复：flagstat `in total` 行无百分比（total 从未解析）+ runner 对静默命令超时不生效；端到端回归 EXIT=0 | pipeline/tests/；DESIGN.md DEC-12 |
+| RUN-21 | 09-14 23:2x | v2.0.0 变更回归（./run_tests.sh + --dry-run --batch 260422） | ✅ 69/69 + check_design OK | ON_TARGET_P1 60→8（TH-14/REQ-16，panel 正常 8-10%，DEC-15）；REQ-14 跨 0 点语义确认（run_date 取自启动时间戳一次派生，新增 test_misc 跨午夜锚）；DESIGN.md 升 2.0.0 | design_doc/DESIGN.md §8；pipeline/README.md |
+| RUN-22 | 09-14 23:31 | 用户报 `--input 0_raw_data_test/` 全样本 Step1 失败 → 复现+修复 | ❌→✅ | 根因（当时判断）：用户启动环境 PATH 缺 /usr/local/bin 且 TZ=UTC（日志时间戳 15:27 vs 本地 23:27 为指纹），`/bin/sh: singularity: not found` exit=127；`env -i PATH=/usr/bin:/bin TZ=UTC` 精确复现。修复（DEC-16）：Runner 自解析 rt 绝对路径 + PATH 兜底；同环境重跑 `--step 1` 成功 2/2（48s） | results/logs/run_20260914_153005.log（复现）；run_20260914_153118（修复后） |
+| RUN-23 | 09-14 23:4x | 用户提供关键事实：本机 `python` 是容器别名（.bashrc:191 singularity exec mamba.sif python） | ✅ 根因修正+卫兵 | **真实根因=嵌套容器**：python 进程在 mamba_2.6.2.sif 内，容器内看不到宿主 /usr/local/bin/singularity（不在默认 bind），TZ=UTC 由此而来；上轮绝对路径修复对嵌套场景不生效（宿主路径容器内不存在）。对策（DEC-17）：流程纯标准库，改用宿主 /usr/bin/python3（3.12.3）运行；main() 启动卫兵检测 /.singularity.d / SINGULARITY_* → 立即退出（实测退出码 1）并指引；测试 71→73 | design_doc/DESIGN.md DEC-17；pipeline/README §1 运行环境 |
+| RUN-24 | 09-14 23:40 | 用户指出 results/ 根有多余文件（logs/、run_summary.json）→ 目录规约收紧 | ✅ | **results/ 根只允许批次_日期目录**（DEC-09/10 更新）：tee 缓冲模式延迟落盘（单批次=本批次 logs/、多批次=首个批次、dry-run 零落盘）；run_summary 逐批写批次目录快照、不写全局、dry-run 不写；历史 5 个 run_*.log 迁入 260422_20260914/logs/、删全局 run_summary.json；实跑 `--step 0` 验证落盘位置正确；测试 73→76（缓冲/延迟落盘 + dry-run 端到端目录规约断言） | results/260422_20260914/logs/；tests/test_misc.py |
+| RUN-25 | 09-15 00:1x | 用户全流程运行 0_raw_data_test 后报 Step1 Q30 显示 None% | ✅ 已修 | fastp json 键名与真实产物不符：parse 取不存在的 `q30_rate_r1/r2`（after_filtering 实际只有整体 `q30_rate` 且为小数，R1/R2 分列在顶层 read{1,2}_after_filtering 且无 rate 键需 bases 自算）；采集端曾按小数再 ×100 与百分数阈值口径混乱；**测试 fixture 是凭想象造的结构（q30_rate_r1 键现实不存在）——测试全绿但真实数据恒 None**。修复：统一百分数口径+fixture 按真实产物校准；真实 json 验证 NA12878 Q30 85.76%（R1 86.64 与 fastp stdout 逐位吻合）、NA18544 86.82%，run_summary q30_pct 正确 | design_doc/DESIGN.md CHANGELOG 2.1.1；tests/test_parsers.py |
+| RUN-26 | 09-16 08:5x | 用户要求：环境参数（钉钉地址等）去硬编码改 .env；singularity 位置不变。修正：.env 按 user 指定放 **pipeline/ 目录内**（与代码同目录），不放 $WORK 根 | ✅ | 实现 DEC-18：config.py 新增 parse_env_file/启动加载（三源优先级=进程环境 > pipeline/.env > 内置默认，GWAS_ENV_FILE 可改址），**移除硬编码 webhook 默认值**（密钥迁 pipeline/.env，chmod 600，.env.example 模板）；dingtalk 未配置→通知静默跳过（启动 WARN+send 返回配置指引，`--notify-test` 退出码 1 且提示配置方法）；SIF_DIR 仍= $WORK/singularity（目录约定）；启动日志新增"环境配置"行；测试 75→86（test_envfile.py 含防回潮锚：源码不得出现 access_token=）。验证：tests+check_design 全绿、dry-run 正常、`--notify-test` 实发成功（.env→config→钉钉链路）、GWAS_ENV_FILE 指向不存在文件时降级正确、进程环境变量优先级实测 | design_doc/DESIGN.md DEC-18/CHANGELOG 2.2.0；pipeline/.env(.example)；tests/test_envfile.py |
+| RUN-27 | 09-16 10:0x | 用户要求：交付目录 delivery→**Output**；MultiQC 报告放入交付目录。澄清：MultiQC 必须在**其他流程全部结束、QC 文件生成完全后**生成最终报告，然后才拷入交付目录 | ✅ | DELIVERY_DIR 默认改 `$WORK/Output`；**MultiQC 移至 Step 6 末尾**：mosdepth/HsMetrics → 矩阵裁决 → 每样本 VCF 重建 → MultiQC 最终报告 → 交付导出（首轮曾放裁决之前，按用户澄清时序重排；export_delivery 移出裁决块、增 extra_files）：MultiQC html 平铺交付目录、幂等（mtime）、纳入 md5sum.txt/MANIFEST（sample 列=multiqc、records=-）/README 交付说明；旧 `Output/` 只读口径废止，安全边界改为 0_raw_data/back 只读；历史 delivery/（260422_20260914+INDEX.md）mv 迁移为 Output/ 并用真实产物重导出（真实 Runner bcftools 计数 10967/10967）。**顺带修复 3 处 dry-run 潜伏 bug**（全流程 dry-run 曾仅在同日实跑过后才能成功）：①gvcf.list 写入无守卫（跨日新日期目录 FileNotFoundError）②scanner.merge_all 建目录无守卫（dry-run 残留空 fastq_merged/）③disk_usage 对不存在的 results 根直接崩。验证：89 tests+check_design 全绿（含 MultiQC 时序锚、全流程 dry-run 零落盘锚）；Output/260422_20260914 md5sum -c 3 文件全过（2 VCF+MultiQC），VCF mtime 保留未重拷；dry-run 退出码 0、0 ERROR、results/ 零落盘 | design_doc/DESIGN.md DEC-02/CHANGELOG 2.3.0；Output/260422_20260914/；tests/test_misc.py |
+| RUN-28 | 09-16 11:0x | 用户要求：删除所有文档中与 Illumina 比对相关的内容（比对不属于本流程）；整理废弃内容，删除项先经用户确认 | ✅ | 确认结果：台账清除比对痕迹保留其余 / CHANGELOG 改写去比对字样 / PROMPT 原件保留 / results/ 比对产物全删（实际已不存在，仅清 compare.pyc 残留）。执行：DESIGN.md 删 §7 比对数据表（节号 8/9/10→7/8/9）、REQ-09/DEC-06/07、DEC-15 收敛为阈值口径、TH-17~20 注简化、§1/§3 比对表述、证据索引修正（删已废弃全局 run_summary 与比对报告行、测试数→89、results/logs 路径、README §9→§8 引用）；RUN_HISTORY 删总览金标准要点、各行一致率/比对字样（保留 GT 列互换等修复链）、指标表删 SNP一致率列；pipeline/README 头部比对段+§2 Illumina 字样+过时 results/logs 注释+view -T→-R；tests/README 两行比对移除句；config.py 比对注释；CHANGELOG 2.0.0 两行改写。tests 89+check_design 全绿 | design_doc/DESIGN.md CHANGELOG 2.4.0；RUN_HISTORY.md |
+| RUN-29 | 09-16 11:58-12:44 | **用户实跑 --input 0_raw_data_test/**（260422+260720 两批，v2.3.0 新链路首验）→ 日志分析发现 4 项问题 → 用户确认执行修复 | ✅ 两批 success + 修复完成 | 实跑健康：0 ERROR/0 P0/P1；机器 16 线程/46.4G 自动降档 workers=2×4（资源自适应实证）；MultiQC 末位生成→随交付进 Output/ 两批 md5sum -c 全过。发现并修复：①norm_split 把 .tbi 混进 norm 命令 outputs——.tbi 由后续 index 命令生成，首跑必误报"命令成功但产物缺失"（两批各一次）→ outputs 只留 vcf；②对账 RESULT 文案仍写 view -T 而命令已用 -R（DEC-11）→ 文案修正；③notify=on 但日志零通知痕迹（成功不落日志）→ send_markdown 成功 logger.info"钉钉已发送: 标题"；④INDEX.md 整体重写只含本次运行批次，历史交付 260422_20260914 从索引消失 → write_delivery_index 累积合并（扫描 Output/ 全部交付目录∪本次）并即时重生成找回。测试 89→92（norm outputs/发送日志/索引累积锚）+check_design 全绿；dry-run 零落盘复验 | design_doc/DESIGN.md CHANGELOG 2.5.0；Output/INDEX.md；tests/ |
+| RUN-30 | 09-16 13:4x | 用户要求：design_doc 移入 pipeline/、PROMPT 入 .gitignore、GitHub 增加 Actions CI | ✅ | design_doc/（DESIGN/notes/RUN_HISTORY）迁入 pipeline/ 随 git 仓库管理；PROMPT_GWAS_pipeline.md（含 token）与 README_pipeline.md（内部完整版，文件头自我声明不对外推送）加入 .gitignore，git check-ignore 验证生效；check_design.py 设计文档路径改 pipeline 内相对——克隆仓库即可全绿跑 run_tests.sh（此前 check_design 依赖仓库外路径，克隆机必挂）；新增 .github/workflows/ci.yml（ubuntu 矩阵 py3.10/3.12，checkout+setup-python+run_tests.sh）；测试 CI 兼容化：test_rt_resolved_absolute 改自包含（临时 PATH 植入假 singularity 可执行文件，CI 无真运行时也可验证绝对路径解析）、test_results_root_only_batch_dirs 与 test_full_flow_dry_run_zero_writes 加 --resource-profile low（CI 内存 ~16G < auto 档峰值 19.8G，不加固会在 runner 上快速失败）；DESIGN 升 2.6.0。92 tests+check_design 全绿 | .github/workflows/ci.yml；design_doc/ |
+
+## 三、指标速查（最终有效轮：RUN-08/15 数据）<!-- MACHINE -->
+
+| 批次 | 样本 | fastp保留率 | mapped | dup | 20X | raw SNP/INDEL | PASS SNP/INDEL | Ti/Tv |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 20260720 | 13(NTC排除12) | 99.4% | 99.9% | 19.4% | 84.2% | 14742/2446 | 13768/2856 | 1.97→2.09 |
+| 251016 | 2 | 90.3% | 100% | 2.0% | 87.4% | 9616/1290 | 8966/1250 | 2.1→2.16 |
+| 260422 | 2 | 92.0% | 100% | 2.1% | 95.7% | 10279/1599 | 9499/1441 | 2.0→2.14 |
+| 260529 | 2 | 90.3% | 100% | 1.8% | 95.5% | 10141/1472 | 9470/1400 | 2.07→2.16 |
+
+> 注：20260720 的 20X 均值含 NTC 0%（对照样本不判级，DEC-13）；低覆盖样本
+> （L200100435 44.7×、CB261007729-OSW 87.1%）已在当轮以 WARN/P1 呈现。

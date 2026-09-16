@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """设计文档一致性校验（防漂移）：
-  1) design_doc/DESIGN.md 的 TH 阈值表必须与 pipeline/config.py 实际值一致
+  1) design_doc/DESIGN.md 的 TH 阈值表必须与 config.py 实际值一致
   2) REQ 表不允许存在未回写状态的行（人新增需求后机器必须实现并回写）
 用法：python3 pipeline/check_design.py   （run_tests.sh 末尾自动执行）
 """
@@ -14,7 +14,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import config                                       # noqa: E402
 
 DESIGN = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                      os.pardir, "design_doc", "DESIGN.md")
+                      "design_doc", "DESIGN.md")
 
 
 def _parse_value(raw):

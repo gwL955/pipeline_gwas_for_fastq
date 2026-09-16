@@ -3,6 +3,12 @@
 .env.*
 !.env.example
 
+# ===== 内部文档（仅存服务器，不入仓库）=====
+# PROMPT：历史提示词原件，正文含钉钉 webhook access_token（密钥）
+design_doc/PROMPT_GWAS_pipeline.md
+# README_pipeline.md：pipeline/README.md 的内部完整版（含服务器真实路径与本机实测细节，文件头自我声明不对外推送）
+design_doc/README_pipeline.md
+
 # ===== 生信大文件兜底（防止数据被误加入）=====
 *.fastq
 *.fastq.gz

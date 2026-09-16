@@ -7,6 +7,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -29,10 +30,20 @@ class TestRunner(unittest.TestCase):
 
     def test_rt_resolved_absolute(self):
         """踩坑回归：PATH 受限环境启动曾致 `singularity: not found` exit=127
-        （实测 /usr/local/bin 不在调用方 PATH）——rt 必须自解析为绝对路径"""
-        self.assertTrue(os.path.isabs(self.r.rt))
-        self.assertTrue(os.access(self.r.rt, os.X_OK))
-        self.assertIn("exec", self.r.tool("bcftools", "bcftools view -h x"))
+        （实测 /usr/local/bin 不在调用方 PATH）——rt 必须自解析为绝对路径。
+        自包含：临时目录植入可执行的假运行时并置于 PATH 首位——无 singularity
+        的机器（CI）同样能验证解析语义，不依赖本机是否装了真运行时"""
+        with tempfile.TemporaryDirectory() as td:
+            fake = os.path.join(td, "singularity")
+            with open(fake, "w") as f:
+                f.write("#!/bin/sh\nexit 0\n")
+            os.chmod(fake, 0o755)
+            with mock.patch.dict(os.environ,
+                                 {"PATH": td + os.pathsep + os.environ.get("PATH", "")}):
+                r = Runner()
+            self.assertEqual(r.rt, fake)        # 解析为绝对路径而非裸命令名
+            self.assertTrue(os.access(r.rt, os.X_OK))
+            self.assertIn("exec", r.tool("bcftools", "bcftools view -h x"))
 
     def test_env_path_hardened(self):
         """PATH 兜底：标准系统目录必须在子进程 PATH 里（精简 env 不应再炸）"""

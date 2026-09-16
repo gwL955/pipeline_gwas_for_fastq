@@ -75,7 +75,11 @@ class TestLoggerTee(unittest.TestCase):
                 [sys.executable,
                  os.path.join(os.path.dirname(os.path.dirname(
                      os.path.abspath(__file__))), "run_pipeline.py"),
-                 "--dry-run", "--input", os.path.join(td, "in")],
+                 "--dry-run", "--resource-profile", "low",
+                 # ↑ low 档按 16 线程/20G 口径规划：CI runner 内存 ~16G，
+                 #   auto 档探测会因单样本峰值 19.8G 触发快速失败（dry-run
+                 #   不执行命令，规划口径不影响断言语义）
+                 "--input", os.path.join(td, "in")],
                 env=env, capture_output=True, text=True, timeout=90)
             self.assertEqual(r.returncode, 0, r.stderr[-500:])
             res = os.path.join(td, "results")
@@ -85,7 +89,6 @@ class TestLoggerTee(unittest.TestCase):
                 self.assertRegex(n, r"^DEMO_\d{8}$")
             self.assertNotIn("logs", names)        # 无全局日志目录
             self.assertNotIn("run_summary.json", names)   # 无全局散文件
-
     def test_full_flow_dry_run_zero_writes(self):
         """★ 全流程 dry-run（有效样本走到 Step 5/6）必须 success 且零落盘。
         gvcf.list 写入与 fastq_merged 目录创建曾无 dry-run 守卫——同日实跑过
@@ -104,7 +107,11 @@ class TestLoggerTee(unittest.TestCase):
                 [sys.executable,
                  os.path.join(os.path.dirname(os.path.dirname(
                      os.path.abspath(__file__))), "run_pipeline.py"),
-                 "--dry-run", "--input", os.path.join(td, "in")],
+                 "--dry-run", "--resource-profile", "low",
+                 # ↑ low 档按 16 线程/20G 口径规划：CI runner 内存 ~16G，
+                 #   auto 档探测会因单样本峰值 19.8G 触发快速失败（dry-run
+                 #   不执行命令，规划口径不影响断言语义）
+                 "--input", os.path.join(td, "in")],
                 env=env, capture_output=True, text=True, timeout=90)
             self.assertEqual(r.returncode, 0, r.stdout[-800:])
             self.assertIn("批次 260422: success", r.stdout)
