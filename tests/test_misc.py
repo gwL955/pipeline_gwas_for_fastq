@@ -181,7 +181,8 @@ class TestLoggerTee(unittest.TestCase):
                 [sys.executable,
                  os.path.join(os.path.dirname(os.path.dirname(
                      os.path.abspath(__file__))), "run_pipeline.py"),
-                 "--dry-run", "--input", "0_raw_data"],
+                 "--dry-run", "--resource-profile", "low",   # CI 内存 <auto 档峰值
+                 "--input", "0_raw_data"],
                 env=env, capture_output=True, text=True, timeout=60)
             self.assertIn("待处理批次: ['DEMO']", r.stdout)
 
