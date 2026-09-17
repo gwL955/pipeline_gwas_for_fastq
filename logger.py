@@ -80,12 +80,16 @@ class TeeStream:
     未捕获 traceback、子进程继承输出都会自动落盘，无需 shell 重定向。
     path=None 时先写入内存缓冲，tee_set_log_path() 确定目标后一并落盘
     （运行日志归属批次结果目录，而目标目录要等批次发现后才知道；
-    dry-run/启动即退场景从不设路径 → 缓冲丢弃，零落盘）。"""
+    dry-run/启动即退场景从不设路径 → 缓冲丢弃，零落盘）。
+    echo 开关（DEC-09 v2.13.0）：实跑在运行日志接管并提示路径后关闭外显，
+    控制台静默、只落文件（nohup 后台不再向 nohup.out 倾倒运行日志）；
+    dry-run/早退场景从不关闭，控制台照常可见。"""
 
     def __init__(self, stream, path=None):
         self._stream = stream
         self._buf = []
         self._fh = None
+        self._echo = True
         if path is not None:
             self._open(path)
 
@@ -100,11 +104,15 @@ class TeeStream:
         if self._fh is None:
             self._open(path)
 
+    def set_echo(self, on):
+        self._echo = on
+
     def write(self, data):
-        try:
-            self._stream.write(data)
-        except (ValueError, OSError):
-            pass   # 控制台已关闭（nohup 后台）时只落盘
+        if self._echo:
+            try:
+                self._stream.write(data)
+            except (ValueError, OSError):
+                pass   # 控制台已关闭（nohup 后台）时只落盘
         if self._fh is not None:
             self._fh.write(data)
         else:
@@ -112,10 +120,11 @@ class TeeStream:
         return len(data)
 
     def flush(self):
-        try:
-            self._stream.flush()
-        except (ValueError, OSError):
-            pass
+        if self._echo:
+            try:
+                self._stream.flush()
+            except (ValueError, OSError):
+                pass
         if self._fh is not None:
             self._fh.flush()
 
@@ -138,6 +147,13 @@ def tee_set_log_path(path):
     for s in (sys.stdout, sys.stderr):
         if isinstance(s, TeeStream):
             s.set_path(path)
+
+
+def tee_set_echo(on):
+    """控制台外显开关（stdout/stderr 同步；只影响回显，文件镜像不受影响）"""
+    for s in (sys.stdout, sys.stderr):
+        if isinstance(s, TeeStream):
+            s.set_echo(on)
 
 
 class SampleLoggerFactory:

@@ -1,6 +1,6 @@
 # pipeline 单元测试集（迁移/改动后的快速回归）
 
-**纯 Python 标准库，无容器、无网络、无真实数据，约 5 秒跑完 109 个用例。**
+**纯 Python 标准库，无容器、无网络、无真实数据，约 5 秒跑完 111 个用例。**
 每个用例对应本项目开发/运行中的真实踩坑或硬性口径，改动代码后先跑本测试再跑真实数据。
 
 ## 运行
@@ -22,11 +22,11 @@ cd pipeline
 | `test_alerts.py` | **P0/P1/P2 三级判定**（v2.9.0 DEC-21：质量阈值全量 P2、NTC 污染 P1、mapped<90 P1 报错不中断）、最差级别、里程碑模板字段、产物摘要 | 分级体系：P0=阻断中断 / P1=严重不中断 / P2=质量提示；NTC 污染曾为 P0（RUN-33 降级锚）；RUN-34 新增 reads 不足/NTC reads 占比/深度 CV/recal 观测数检查 |
 | `test_parsers.py` | fastqc zip（小写状态）、fastp json、markdup/hsmetrics 按表头名、flagstat、samtools stats、bcftools stats、norm 统计、mosdepth summary | fastqc 状态是小写 pass/fail（曾按大写比较误报）；bcftools stats SN 行带文件 ID 列；norm 统计行是 7 字段动态表头；mosdepth 是 6 列且靶区深度取 `total_region` 行；flagstat `in total` 行无百分比（本测试集修复的潜伏 bug）；recal 观测数按 RecalTable1 表头名取列只加 M 行（RUN-34） |
 | `test_variant_post.py` | 矩阵 `./.` 裁决（DP≥20/cells_total）、rebuild 只换 GT、GT 列显式映射、**norm_split 产物检查口径（norm 不查 .tbi）** | **GT 列序互换**曾致两样本基因型对调；矩阵列序必须按 calling 顺序显式映射；norm 命令 outputs 曾混入 .tbi（由后续 index 命令生成），首跑必误报"产物缺失"（RUN-29 修复） |
-| `test_misc.py` | 日志 tee 自动落盘、Logger(None) 控制台模式、`results/<批次>_<日期>` 命名、**run_date 启动时固定（跨 0 点锚）**、**全流程 dry-run success+零落盘锚**、**外送平铺布局端到端锚（RUN-36）**、**样本名白名单 P0 阻断锚（非常规字符→中断分析，DEC-19 v2.8.0）**、**--version 锚**、**相对 --input 尊重 GWAS_RAW_DATA 覆盖锚（RUN-32 事故）**、**MultiQC 时序锚（裁决/重建之后、交付导出之前，v2.7.0 起锚定 step6 方法）**、交付导出（`Output/<批次>_<日期>` 命名、md5sum/MANIFEST/README/幂等 mtime、**MultiQC extra_files 布局与回退**）、**INDEX.md 累积锚（历史交付∪本次运行）** | 手动 shell 重定向曾被认为是必需（现 stdout 自动 tee 进运行日志）；单批次运行不得覆盖全局汇总；交付源未更新不得重拷；执行日期须取自启动时间戳一次性派生，否则跨午夜运行会写进两个日期目录；全流程 dry-run 曾因 gvcf.list 写入/merge 建目录/disk_usage 三处无守卫，仅同日实跑后可用、跨日直接 FileNotFoundError（RUN-27 修复）；MultiQC 时序为用户口径——全部流程结束 QC 齐全后才出最终报告再交付（RUN-27）；交付目录 v2.3.0 由 delivery 改名 Output 且 MultiQC 随交付；INDEX.md 曾整体重写只含本次运行批次，历史交付被挤出索引（RUN-29 修复） |
+| `test_misc.py` | 日志 tee 自动落盘、**echo 开关单元锚（关闭后控制台静默、文件镜像含缓冲前缀不受影响，RUN-37）**、**实跑端到端静默锚（真跑控制台止于"运行日志: 路径"提示行，批次处理日志只进 run_<ts>.log）**、Logger(None) 控制台模式、`results/<批次>_<日期>` 命名、**run_date 启动时固定（跨 0 点锚）**、**全流程 dry-run success+零落盘锚**、**外送平铺布局端到端锚（RUN-36）**、**样本名白名单 P0 阻断锚（非常规字符→中断分析，DEC-19 v2.8.0）**、**--version 锚**、**相对 --input 尊重 GWAS_RAW_DATA 覆盖锚（RUN-32 事故）**、**MultiQC 时序锚（裁决/重建之后、交付导出之前，v2.7.0 起锚定 step6 方法）**、交付导出（`Output/<批次>_<日期>` 命名、md5sum/MANIFEST/README/幂等 mtime、**MultiQC extra_files 布局与回退**）、**INDEX.md 累积锚（历史交付∪本次运行）** | 手动 shell 重定向曾被认为是必需（现 stdout 自动 tee 进运行日志）；实跑曾控制台照常外显致 nohup.out 堆积全量运行日志（RUN-37 关闭：止于日志路径提示行）；交付源未更新不得重拷；执行日期须取自启动时间戳一次性派生，否则跨午夜运行会写进两个日期目录；全流程 dry-run 曾因 gvcf.list 写入/merge 建目录/disk_usage 三处无守卫，仅同日实跑后可用、跨日直接 FileNotFoundError（RUN-27 修复）；MultiQC 时序为用户口径——全部流程结束 QC 齐全后才出最终报告再交付（RUN-27）；交付目录 v2.3.0 由 delivery 改名 Output 且 MultiQC 随交付；INDEX.md 曾整体重写只含本次运行批次，历史交付被挤出索引（RUN-29 修复） |
 
 ## 新服务器迁移后的建议验证顺序
 
-1. `./run_tests.sh` —— 109 用例全绿（验证 Python 版本兼容与全部纯逻辑）
+1. `./run_tests.sh` —— 111 用例全绿（验证 Python 版本兼容与全部纯逻辑）
 2. `cp .env.example .env`（pipeline/ 下）并填入钉钉地址 → `python3 run_pipeline.py --notify-test` —— 钉钉连通性（webhook/关键词，需能出网）
 3. `python3 run_pipeline.py --dry-run --batch <小批次>` —— 容器/参考文件/路径可用性与资源计划推导
 4. `python3 run_pipeline.py --resource-profile low --dry-run` —— 低配档口径（workers=1、sort 128M、GATK 1g）

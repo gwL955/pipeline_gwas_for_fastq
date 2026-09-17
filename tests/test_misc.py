@@ -79,6 +79,61 @@ class TestLoggerTee(unittest.TestCase):
                 sys.stdout, sys.stderr = old_out, old_err
             self.assertEqual(os.listdir(td), before)
 
+    def test_tee_set_echo_silences_console_not_file(self):
+        """★ 实跑外显关闭锚（DEC-09 v2.13.0/RUN-37）：tee_set_echo(False) 后
+        控制台不再回显（nohup 后台不向 nohup.out 倾倒运行日志），
+        文件镜像不受影响（含关闭前的缓冲前缀）"""
+        from logger import tee_set_log_path, tee_set_echo
+        with tempfile.TemporaryDirectory() as td:
+            logp = os.path.join(td, "batch_x", "logs", "run.log")
+            con = io.StringIO()
+            old_out, old_err = sys.stdout, sys.stderr
+            capture_stdio(None)
+            sys.stdout._stream = con          # 控制台端换成可断言的内存流
+            try:
+                print("BEFORE_ECHO_OFF")      # 外显期：控制台+缓冲
+                tee_set_log_path(logp)
+                tee_set_echo(False)
+                print("AFTER_ECHO_OFF")       # 静默期：只落文件
+            finally:
+                sys.stdout, sys.stderr = old_out, old_err
+            body = open(logp, encoding="utf-8").read()
+            self.assertIn("BEFORE_ECHO_OFF", body)   # 缓冲前缀完整落盘
+            self.assertIn("AFTER_ECHO_OFF", body)    # 文件镜像不受 echo 开关影响
+            self.assertIn("BEFORE_ECHO_OFF", con.getvalue())
+            self.assertNotIn("AFTER_ECHO_OFF", con.getvalue())   # 控制台已静默
+
+    def test_real_run_silent_after_log_path_line(self):
+        """★ 实跑端到端静默锚（RUN-37）：真跑（非 dry-run）控制台止于"运行日志:
+        <路径>"提示行，批次处理日志只进 run_<ts>.log；dry-run 行为不变（见相邻
+        dry-run 用例对 stdout 的断言）"""
+        import subprocess
+        with tempfile.TemporaryDirectory() as td:
+            os.makedirs(os.path.join(td, "in", "EMPTY"))   # 空批次 → skipped，无需容器
+            env = {**os.environ, "GWAS_RESULTS": os.path.join(td, "results")}
+            r = subprocess.run(
+                [sys.executable,
+                 os.path.join(os.path.dirname(os.path.dirname(
+                     os.path.abspath(__file__))), "run_pipeline.py"),
+                 "--resource-profile", "low", "--notify", "off",
+                 "--input", os.path.join(td, "in")],
+                env=env, capture_output=True, text=True, timeout=120)
+            self.assertEqual(r.returncode, 0, r.stderr[-500:])
+            self.assertIn("运行日志", r.stdout)              # 路径提示是控制台最后一截
+            self.assertNotIn("批次 EMPTY 结束", r.stdout)     # 处理日志不再外显
+            self.assertNotIn("skipped", r.stdout)
+            # run_<ts>.log 含全量日志（含静默后的批次处理段）；目录名日期动态匹配
+            res = os.path.join(td, "results")
+            bdirs = [n for n in os.listdir(res)
+                     if n.startswith("EMPTY_") and os.path.isdir(os.path.join(res, n))]
+            self.assertTrue(bdirs, "批次结果目录必须生成")
+            logs_dir = os.path.join(res, bdirs[0], "logs")
+            run_logs = [n for n in os.listdir(logs_dir) if n.startswith("run_")]
+            self.assertTrue(run_logs, "run_<ts>.log 必须落盘")
+            body = open(os.path.join(logs_dir, run_logs[0]), encoding="utf-8").read()
+            self.assertIn("批次 EMPTY", body)
+            self.assertIn("skipped", body)
+
     def test_results_root_only_batch_dirs(self):
         """目录规约（RUN-24）：results/ 根下只允许 批次_日期 目录——
         全局 run_summary.json 与 logs/ 不得再产生（dry-run 端到端验证）"""

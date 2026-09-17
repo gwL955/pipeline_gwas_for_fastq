@@ -5,8 +5,8 @@
 
 ## 一、总览 <!-- MACHINE -->
 
-- 累计 36 轮（RUN-01~36），其中失败调试轮 7（R01/R02/R03/R04/R06/R11/R12/R22 前半段中计为 7 个失败轮次）、
-  成功验收轮含最终交付链 R05→R08→R15→R19→R20，变更回归轮 R21（v2.0.0）、R22/23（v2.0.1/2）、R24（v2.1.0）、R25（v2.1.1）、R26（v2.2.0）、R27（v2.3.0）、R28（v2.4.0 文档清理）、R29（v2.5.0 日志分析修复）、R30（v2.6.0 仓库工程化）、R31（v2.7.0 五项修改）、R32（v2.8.0 样本名 P0 阻断）、R33（v2.9.0 分级体系三级化）、R34（v2.10.0 审计项落地）、R35（v2.11.0 设计文档自含化）、R36（v2.12.0 外送平铺布局）。
+- 累计 37 轮（RUN-01~37），其中失败调试轮 7（R01/R02/R03/R04/R06/R11/R12/R22 前半段中计为 7 个失败轮次）、
+  成功验收轮含最终交付链 R05→R08→R15→R19→R20，变更回归轮 R21（v2.0.0）、R22/23（v2.0.1/2）、R24（v2.1.0）、R25（v2.1.1）、R26（v2.2.0）、R27（v2.3.0）、R28（v2.4.0 文档清理）、R29（v2.5.0 日志分析修复）、R30（v2.6.0 仓库工程化）、R31（v2.7.0 五项修改）、R32（v2.8.0 样本名 P0 阻断）、R33（v2.9.0 分级体系三级化）、R34（v2.10.0 审计项落地）、R35（v2.11.0 设计文档自含化）、R36（v2.12.0 外送平铺布局）、R37（v2.13.0 实跑静默）。
 - 关键修复链：binds 遮蔽 → sort -m 格式 → norm 索引 → GT 列序互换 → cgroup 资源边界 →
   对账口径 → 2 个测试集抓出的潜伏 bug。
 
@@ -50,6 +50,7 @@
 | RUN-34 | 09-16 15:1x | 用户圈选 RUN-33 审计项实施：P0 磁盘复查 / P1 reads+空VCF / P2 NTC reads+深度CV+recal | ✅ | DEC-22：①BatchCtx.disk_guard——process_batch 每个 Step 后复查，低于 DISK_MIN_FREE_GB 即 raise 终止批次（dry-run 跳过，测试 GWAS_DISK_MIN_FREE_GB=0 豁免不变）；②step1 采集 after_reads→check_reads_low P1（<1M）+_ntc_reads_anoms（NTC/批次中位 >1% P2）；③step4 parse_recal_observations（RecalTable1 M 行求和，真实 NA12878=580,376,919 健康）<1e5 P2；④step6 裁决 VCF count_records==0 P1 + check_depth_cv（CV>0.5 P2）；TH-33~36 入 DESIGN 并加入 check_design 镜像集；测试 96→103（四新检查/recal 解析 fixture/disk_guard 锚）全绿；真实 --step 0 冒烟。**CI 首推失败→修复**：disk_guard 在 RESULTS_ROOT 不存在时（干净克隆/新机器首轮）直接 disk_usage 崩溃——补祖先回溯（与开跑前检查同策略），干净树+6G cgroup 双模拟复验全绿后复推 | design_doc/DESIGN.md DEC-22/TH-33~36；alerts.py |
 | RUN-35 | 09-16 15:3x | 用户要求：当前实际/修改情况/关键点合并入设计文档；废弃目标删除；目标=可据文档从头重建项目 | ✅ | DESIGN.md 整体重写为自含重建规格（2.11.0）：新增 §3.1 Step 0-6 流程规格表（操作/容器语义/幂等键/分级检查）、§5.2 分级告警体系全表（P0×5/P1×7/P2×9）、§5.3 资源推导、§5.4 通知时机、§6 目录树、§7 配置与接口（.env 键表+三源优先级/CLI 全参/退出码语义）、§9 测试与验收（用例构成/迁移顺序/9.3 重建完成判据）；REQ-08/12 更新现口径；DEC 表按编号重排（22 项全保留）；TH×32/REQ×16/DEC 编号锚全部稳定；历史沿革收敛于 §10 CHANGELOG；config.PIPELINE_VERSION 同步 2.11.0（check_design 双源校验通过） | design_doc/DESIGN.md v2.11.0 |
 | RUN-36 | 09-17 11:2x→12:3x | 用户报 `--input 0_raw_data_test/`（260917 批）报"无任何有效样本"跳过 → 排查确认：外送交付数据直接平铺于批次目录（`<长前缀样本名>_R1.fastq.gz`），两种识别器都不认（外送式要求子目录、Illumina 式要求 `_S#_L###_` 命名），未识别文件静默忽略故无原因可查。用户指示：新增该布局识别（识别部分独立函数化）、补测试、同步文档、推 GitHub | ✅ | DEC-23：布局识别器独立函数化——scan_illumina_flat/scan_outsourced_subdir/scan_outsourced_flat 统一签名登记 LAYOUT_SCANNERS，scan_batch 只做编排（先认者优先、同名冲突记无效、其余校验逻辑不变）；新识别器 FLAT_OUTSOURCED_RE 整名锚定与 Illumina 式互斥（结尾 `_R#.fastq.gz` vs `_001.fastq.gz` 不可能兼得）；顺带修 verify_md5 平铺外送样本名推导（原 fallback 取整个文件名，md5_failed 与 valid 无交集，同 RUN-33 病根）；samples.tsv note 增"外送平铺"标签。验证：109 tests+check_design 全绿；真实 260917 dry-run 全流程 success（3 样本/0.87GB）；`--step 0` 实跑 success（合并产物字节对齐源文件）；--notify off 全程无计划外钉钉通知 | design_doc/DESIGN.md DEC-23/CHANGELOG 2.12.0；tests/test_scanner.py、test_misc.py |
+| RUN-37 | 09-17 12:4x | 用户要求修改日志输出：`nohup … &` 运行时外显全量日志倾倒进 nohup.out。原方案（落输入目录同级 log/、以运行日期+开始时间命名）在实现中途取消——用户确认 tee 已把全量日志落 `results/<批次>_<日期>/logs/run_<ts>.log`，直接关闭外显即可 | ✅ | DEC-09 修订：TeeStream 增 echo 开关（tee_set_echo，只控回显、文件镜像不受影响）；main() 在"运行日志: <路径>"提示行后 tee_set_echo(False)——控制台保留启动段（资源计划/参数/批次清单/日志路径指针，便于 tail -f），启动错误（输入目录不存在等）发生在外显期仍直接可见；dry-run/无批次早退不关（控制台全程可见+零落盘）。验证：111 tests+check_design 全绿；真实 260917 `--step 0`（幂等）控制台止于日志路径行、run_<ts>.log 含全量（含 success 结束行）；dry-run 控制台照常全量输出 | design_doc/DESIGN.md DEC-09/CHANGELOG 2.13.0；tests/test_misc.py |
 
 ## 三、指标速查（最终有效轮：RUN-08/15 数据）<!-- MACHINE -->
 

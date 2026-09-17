@@ -30,7 +30,8 @@ import scanner
 import dingtalk
 import alerts
 import report as report_mod
-from logger import Logger, SampleLoggerFactory, capture_stdio, tee_set_log_path
+from logger import (Logger, SampleLoggerFactory,
+                    capture_stdio, tee_set_log_path, tee_set_echo)
 from runner import Runner, nonempty
 from modules import fastqc as mfastqc
 from modules import fastp as mfastp
@@ -1267,6 +1268,11 @@ def main():
         tee_set_log_path(run_log_path)
     main_logger.info("运行日志（自动落盘，无需 shell 重定向）: "
                      + (run_log_path if run_log_path else "（dry-run 不落盘）"))
+    if run_log_path:
+        # 实跑取消控制台外显（DEC-09 v2.13.0）：上面的路径提示是控制台最后一行，
+        # 此后全量日志只进 run_<ts>.log——nohup 后台不再向 nohup.out 倾倒；
+        # dry-run/启动即退（无 run_log_path）不关，控制台照常可见
+        tee_set_echo(False)
 
     summary = {
         "run": {"timestamp": ts, "argv": " ".join(sys.argv),

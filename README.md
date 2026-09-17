@@ -28,9 +28,10 @@ python3 run_pipeline.py --dry-run --batch 260422
 python3 run_pipeline.py --batch 260422
 
 # ③ 全量：遍历 0_raw_data 下全部批次，逐批独立执行
-#    日志全自动落盘（程序接管 stdout/stderr tee 进 results/<批次>_<日期>/logs/run_<时间戳>.log），
-#    无需 shell 重定向；nohup 仅用于后台防断线
-nohup python3 run_pipeline.py --input 0_raw_data >/dev/null 2>&1 &
+#    日志全自动落盘（tee 进 results/<批次>_<日期>/logs/run_<时间戳>.log），无需 shell
+#    重定向；实跑控制台在打印日志路径提示行后即静默（v2.13.0），nohup 仅用于后台
+#    防断线，nohup.out 不会再堆积运行日志
+nohup python3 run_pipeline.py --input 0_raw_data &
 
 # ④ 低配档核对 / 钉钉测试
 python3 run_pipeline.py --resource-profile low --dry-run
@@ -42,12 +43,14 @@ python3 run_pipeline.py --notify-test
 
 ## 1.1 日志说明（自动输出，无需重定向）
 
-程序启动即接管自身 stdout/stderr（tee 镜像）：控制台照常显示，同时自动落盘——
-包括资源计划表、快速失败报错与任何未捕获输出。因此后台运行只需
-`nohup … >/dev/null 2>&1 &`。**`results/` 根下只有 `<批次>_<执行日期>/` 目录**，
-所有日志归属批次目录（dry-run 不落盘）：
+程序启动即接管自身 stdout/stderr（tee 镜像），包括资源计划表、快速失败报错与任何
+未捕获输出，全部自动落盘。**实跑（v2.13.0 起）取消控制台外显**：控制台只显示启动段
+（资源计划、参数、批次清单），到"运行日志: <路径>"提示行为止——此后全量日志只进
+run_<ts>.log，`nohup … &` 后台运行不再向 nohup.out 倾倒（启动错误如输入目录不存在
+发生在外显期，仍直接可见）；**dry-run 保持控制台全程可见**且零落盘。
+**`results/` 根下只有 `<批次>_<执行日期>/` 目录**，所有日志归属批次目录：
 
-- `results/<批次>_<日期>/logs/run_<ts>.log`：本次运行的入口日志（tee 自控制台，
+- `results/<批次>_<日期>/logs/run_<ts>.log`：本次运行的入口日志（tee 全量镜像，
   含资源计划与主控输出；多批次运行写在首个批次目录下）
 - `results/<批次>_<日期>/logs/pipeline_<ts>.log`：批次主日志
 - `results/<批次>_<日期>/logs/sample_<样本>.log`：每样本独立日志（时间戳+耗时）

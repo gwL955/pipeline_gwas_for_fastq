@@ -3,7 +3,7 @@
 ```yaml
 # ---- design-meta（机器可解析锚点，勿手改格式；版本规则见 §0）----
 doc: GWAS-pipeline-design
-version: 2.12.0
+version: 2.13.0
 updated: 2026-09-17
 owner_human: gewenlong
 owner_machine: ZCode(GLM)
@@ -135,7 +135,7 @@ cohort 级与 MultiQC 串行。样本失败即隔离（记入 failed，退出后
 | DEC-04 | 命令/参数语义以笔记为准；资源参数规划化；差异记录于 pipeline/README §8 | 冲突裁决顺序 |
 | DEC-05 | 样本列序全链 sorted（calling/gvcf.list/裁决矩阵/重建） | GT 列互换 bug：曾致两样本基因型对调（RUN-07→08） |
 | DEC-08 | 钉钉：标题 `[GWAS][P级别]`（关键词实测只校验正文且大小写敏感，正文自动兜底小写 gwas）；表格自动降级列表；DINGTALK_MILESTONES=0 只发异常级 | 官方文档实测（RUN-16 前探测实验） |
-| DEC-09 | 日志 tee：capture_stdio **缓冲模式**接管 stdout/stderr，批次发现后落盘到批次目录（单批次=该批次 logs/；多批次=首个批次 logs/）；dry-run/启动即退缓冲丢弃零落盘；results/ 根禁止散文件 | 用户要求"日志自动输出"（RUN-16/24） |
+| DEC-09 | 日志 tee：capture_stdio **缓冲模式**接管 stdout/stderr，批次发现后落盘到批次目录（单批次=该批次 logs/；多批次=首个批次 logs/）；dry-run/启动即退缓冲丢弃零落盘；results/ 根禁止散文件。**v2.13.0 起实跑取消控制台外显**：控制台止于"运行日志: <路径>"提示行（tee_set_echo(False)，启动错误仍在外显期可见），此后全量日志只进 run_<ts>.log——nohup 后台不再向 nohup.out 倾倒；dry-run 保持控制台全程可见 | 用户要求"日志自动输出"（RUN-16/24）；用户要求实跑免 nohup.out 堆积（RUN-37） |
 | DEC-10 | run_summary.json **逐批写入该批次目录**（快照含截至该批的 run+资源计划+各批次状态+pipeline_version）；results/ 根不写全局文件；dry-run 不写 | 曾写全局 run_summary 且单批次也落全局（RUN-24 收紧） |
 | DEC-11 | 对账同口径：矩阵(query -R) 与核对(view -R) 一致；新鲜度=关键 VCF mtime<本次启动 | -R/-T 对跨界 indel 取舍不同（RUN-19：7399 vs 7390） |
 | DEC-12 | 测试集 = 踩坑回归集；迁移验证顺序见 §9.2 | 已抓出 flagstat total 行、runner 静默超时 2 个潜伏 bug（RUN-20） |
@@ -254,7 +254,7 @@ cohort 级与 MultiQC 串行。样本失败即隔离（记入 failed，退出后
 - **`results/` 根下只允许 `<批次>_<执行日期>/` 目录，无任何散文件/子目录**
 - `results/<批次>_<执行日期>/`：samples.tsv、fastq_merged/fastq_clean/bam/gvcf/cohort/matrix/per_sample_vcf/qc、run_report.md、run_summary.json、logs/（执行日期启动时固定，跨 0 点不切换，DEC-01）
 - `Output/<批次>_<执行日期>/`：`*.PASS.adjudicated.vcf.gz(+.tbi)`、`*multiqc_report.html`、md5sum.txt、MANIFEST.tsv、README.md（含版本行）；`Output/INDEX.md` 跨批次**累积**索引（扫描全部历史交付目录 ∪ 本次运行）
-- 日志层级：`<批次>/logs/run_<ts>.log`（入口 tee，多批次写首个批次目录）→ `logs/pipeline_<ts>.log` → `sample_<样本>.log`；dry-run 全部不落盘
+- 日志层级：`<批次>/logs/run_<ts>.log`（入口 tee 全量镜像，多批次写首个批次目录；实跑控制台止于日志路径提示行后静默，DEC-09）→ `logs/pipeline_<ts>.log` → `sample_<样本>.log`；dry-run 全部不落盘且控制台全程可见
 - run_summary.json：逐批写批次目录快照（DEC-10）；`--out` 显式覆盖时写该目录
 
 ```
@@ -339,14 +339,14 @@ results/260422_20260914/                     Output/260422_20260914/
 | test_parsers.py | fastqc/fastp(json 真实结构)/markdup/hsmetrics/flagstat/stats/bcftools/mosdepth/recal 观测数 |
 | test_variant_post.py | 矩阵 `./.` 裁决、重建只换 GT、GT 列显式映射、norm outputs 口径 |
 | test_envfile.py | .env 解析语法、三源优先级、webhook 默认空、防回潮锚（源码无 access_token=）、降级 |
-| test_misc.py | tee 自动落盘、目录命名、跨午夜锚、全流程 dry-run success+零落盘锚、样本名 P0 阻断锚、--input 覆盖锚、--version、MultiQC 时序锚（step6 方法）、交付导出（Output 命名/md5sum/MANIFEST/MultiQC extra/幂等）、INDEX 累积锚、disk_guard、外送平铺布局端到端锚（RUN-36） |
+| test_misc.py | tee 自动落盘、**实跑静默锚（控制台止于日志路径提示行，处理日志只进 run_<ts>.log，RUN-37）**、目录命名、跨午夜锚、全流程 dry-run success+零落盘锚、样本名 P0 阻断锚、--input 覆盖锚、--version、MultiQC 时序锚（step6 方法）、交付导出（Output 命名/md5sum/MANIFEST/MultiQC extra/幂等）、INDEX 累积锚、disk_guard、外送平铺布局端到端锚（RUN-36） |
 
 `./run_tests.sh` = unittest 全量 + `check_design.py`（TH↔config + 版本双源）；
 CI（.github/workflows/ci.yml）在 py3.10/3.12 矩阵执行。
 
 ### 9.2 迁移/重建验证顺序（DEC-12）
 
-1. `./run_tests.sh` 全绿（全部用例数见 §9.1 各文件，当前共 109）
+1. `./run_tests.sh` 全绿（全部用例数见 §9.1 各文件，当前共 111）
 2. `cp .env.example .env` 填 webhook → `python3 run_pipeline.py --notify-test`（连通性）
 3. `python3 run_pipeline.py --dry-run --batch <小批次>`（容器/参考文件/路径与资源计划）
 4. `python3 run_pipeline.py --resource-profile low --dry-run`（低配档口径）
@@ -354,7 +354,7 @@ CI（.github/workflows/ci.yml）在 py3.10/3.12 矩阵执行。
 
 ### 9.3 重建完成判据
 
-109 用例 + check_design 全绿；`--version` 输出与本文档 version 一致；dry-run 零落盘；
+111 用例 + check_design 全绿；`--version` 输出与本文档 version 一致；dry-run 零落盘；
 单批次实跑 success 且 Step 6 交付目录含 VCF+tbi+MultiQC，`md5sum -c` 全过。
 
 ## 10. 变更日志（CHANGELOG）<!-- 人机共写：每方改动各记一行 -->
@@ -393,6 +393,8 @@ CI（.github/workflows/ci.yml）在 py3.10/3.12 矩阵执行。
 | 2.11.0 | 2026-09-16 | 机 | 新增 §3.1 Step 0-6 流程规格表（操作/幂等键/分级）、§5.2 分级告警体系全表、§5.3 资源推导、§7 配置与接口（.env/CLI/退出码）、§9 测试与验收（含 9.3 重建完成判据）、§6 目录树；REQ-08/12 更新为现口径；DEC 表按编号重排；TH/REQ/DEC 编号锚全部稳定不变；RUN-35 |
 | 2.12.0 | 2026-09-17 | 人 | 新增第三种输入布局识别：外送平铺（`<批次>/<样本>_R[12].fastq.gz` 直接平铺于批次目录）；识别逻辑拆为独立函数以防后续新格式 |
 | 2.12.0 | 2026-09-17 | 机 | DEC-23：scan_illumina_flat/scan_outsourced_subdir/scan_outsourced_flat 三识别器登记 LAYOUT_SCANNERS（先认者优先、同名冲突记无效）；顺带修 verify_md5 平铺外送样本名推导（同 RUN-33 病根）；samples.tsv note 增"外送平铺"标签；测试 103→109（布局/互斥/冲突/md5 推导/E2E 锚）；RUN-36 |
+| 2.13.0 | 2026-09-17 | 人 | 实跑取消控制台外显：nohup 后台运行时运行日志不再倾倒进 nohup.out（原计划重定向到输入目录同级 log/，确认 tee 已落 run_<ts>.log 后简化为只关外显） |
+| 2.13.0 | 2026-09-17 | 机 | DEC-09 修订：TeeStream 增 echo 开关（tee_set_echo），main() 在"运行日志: <路径>"提示行后关闭——控制台含启动段（资源计划/参数/批次清单/日志路径），启动错误（外显期）仍可见；dry-run/早退不关；测试 109→111（echo 单元锚 + 实跑静默 E2E 锚）；RUN-37 |
 
 ## 11. 证据索引 <!-- MACHINE -->
 
@@ -401,7 +403,7 @@ CI（.github/workflows/ci.yml）在 py3.10/3.12 矩阵执行。
 | 运行台账（每轮） | pipeline/design_doc/RUN_HISTORY.md |
 | 验收运行（0_raw_data_test） | results/260422_20260914/、results/260422_20260916/ 等（运行日志在各批次 logs/） |
 | 交付 | Output/<批次>_<日期>/ + INDEX.md（累积） |
-| 测试集与 CI | pipeline/tests/（109 用例）+ run_tests.sh + .github/workflows/ci.yml |
+| 测试集与 CI | pipeline/tests/（111 用例）+ run_tests.sh + .github/workflows/ci.yml |
 | 使用说明/与笔记差异 | pipeline/README.md |
 | 环境参数 | pipeline/.env（密钥，600）+ pipeline/.env.example（模板） |
 | 命令参考快照 | pipeline/design_doc/notes_code_reference.md |
