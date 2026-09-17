@@ -84,10 +84,14 @@ python3 run_pipeline.py --notify-test    # 验证钉钉链路
 
 - 输入：`0_raw_data/<批次>/`，批次是最小分析单元，**各批次完全独立**
   （独立扫描/QC/比对/去重/BQSR/批次内联合分型/过滤，结果隔离在
-  `results/<批次>_<执行日期>/`，严禁跨批次合并样本或 gVCF）。两种布局自动识别：
+  `results/<批次>_<执行日期>/`，严禁跨批次合并样本或 gVCF）。三种布局自动识别：
   1. Illumina 平铺多 Lane：`260422/NA12878_S46_L001_R1_001.fastq.gz`
      （样本名 = 去掉 `_S\d+_L\d+_R[12]_001.fastq.gz` 的前缀）
-  2. 外送子目录：`20260720/<样本名>/<样本名>_R1.fastq.gz`
+  2. 外送子目录：`20260720/<样本名>/<样本名>_R1.fastq.gz`（样本名 = 子目录名）
+  3. 外送平铺（v2.12.0/RUN-36）：`260917/<样本名>_R1.fastq.gz` 直接放批次目录
+     （样本名 = 去掉 `_R[12].fastq.gz` 的前缀）
+  每种布局一个独立识别器函数（`scanner.LAYOUT_SCANNERS`，DEC-23），
+  依序应用、先认者优先，新增输入格式只需追加函数
 - 批次内 `md5sum.txt` 存在时先做并行 md5 校验，失败样本终止分析并进入通知
 - **只读**：`0_raw_data/`、`back/` 一律只读；一切分析产物写入 `results/<批次>_<执行日期>/`；
   交付文件仅由导出步骤写入 `Output/<批次>_<执行日期>/`（v2.3.0 前为 `delivery/`）
@@ -298,7 +302,7 @@ $WORK/
     ├── logger.py         # 主日志 + 每样本日志（线程安全、时间戳+耗时、stdio tee）
     ├── runner.py         # singularity 封装、实时输出、超时、返回码、幂等 SKIP
     ├── resource.py       # ★ 资源探测与规划（cgroup/WSL2 识别、workers×线程×内存推导）
-    ├── scanner.py        # 两种输入布局扫描 + md5 校验 + Lane 合并 + samples.tsv
+    ├── scanner.py        # 三种输入布局扫描（识别器独立函数）+ md5 校验 + Lane 合并 + samples.tsv
     ├── dingtalk.py       # 钉钉 markdown 通知（urllib 直连 + 三重结构规范化）
     ├── alerts.py         # ★ 分级告警（P0/P1 阈值检查）+ 步骤里程碑消息构造
     ├── report.py         # 运行报告 markdown + run_summary.json

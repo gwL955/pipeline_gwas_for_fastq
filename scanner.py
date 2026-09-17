@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""输入布局扫描（Illumina 平铺多 Lane / 外送子目录两种布局）+ md5 校验 +
+"""输入布局扫描（三种布局，每式一个独立识别器函数）+ md5 校验 +
 Lane 合并 + samples.tsv 生成。批次是最小分析单元，本模块按单个批次工作。"""
 
 import os
@@ -14,12 +14,18 @@ from runner import nonempty
 ILLUMINA_RE = re.compile(
     r"^(?P<sample>.+)_S(?P<snum>\d+)_L(?P<lane>\d{3})_R(?P<read>[12])_001\.fastq\.gz$")
 OUTSOURCED_RE = re.compile(r"_R(?P<read>[12])\.fastq\.gz$")
+# 外送平铺整名锚定；与 ILLUMINA_RE 互斥（结尾 _R#.fastq.gz 与 _001.fastq.gz 不可能兼得）
+FLAT_OUTSOURCED_RE = re.compile(r"^(?P<sample>.+)_R(?P<read>[12])\.fastq\.gz$")
+
+# 布局中文名（冲突提示/samples.tsv note 列共用）
+LAYOUT_LABELS = {"illumina": "平铺", "outsourced": "外送",
+                 "outsourced_flat": "外送平铺"}
 
 
 class SampleInfo:
     def __init__(self, sample, layout):
         self.sample = sample
-        self.layout = layout          # "illumina" / "outsourced"
+        self.layout = layout          # "illumina" / "outsourced" / "outsourced_flat"
         self.r1 = []                  # 宿主绝对路径列表（按 Lane 排序）
         self.r2 = []
         self.snum = None              # Illumina S 号（追溯用）
@@ -33,22 +39,18 @@ class SampleInfo:
     def note(self):
         if self.layout == "illumina":
             return f"{self.snum};Lane={'-'.join(self.lanes)}"
-        return f"外送;{len(self.r1)}文件"
+        return f"{LAYOUT_LABELS.get(self.layout, self.layout)};{len(self.r1)}文件"
 
 
-def scan_batch(batch_dir):
-    """扫描批次目录 → (有效样本 dict, 无效样本 dict{sm: reason})。
-    输入校验：R1/R2 文件数不一致、单端、0 字节 → 标记无效并跳过。"""
-    samples, invalid = {}, {}
-    flat, subdirs = [], []
-    for name in sorted(os.listdir(batch_dir)):
-        p = os.path.join(batch_dir, name)
-        if os.path.isfile(p):
-            flat.append(p)
-        elif os.path.isdir(p):
-            subdirs.append(p)
+# ── 布局识别器（DEC-23：每式一个独立函数并登记于 LAYOUT_SCANNERS，
+#    新增输入格式只追加函数，不动 scan_batch 主体）───────────────────────
+# 样本名来源：Illumina 平铺=文件名去 _S#_L###_R[12]_001 尾；外送子目录=子目录名；
+# 外送平铺=文件名去 _R[12] 尾（RUN-36 新增——外送交付常直接平铺于批次目录）。
 
-    # 布局 1：Illumina 平铺（BCLConvert 命名，多 Lane）
+
+def scan_illumina_flat(flat, subdirs):
+    """布局 1：Illumina 平铺（BCLConvert 命名，多 Lane）"""
+    samples = {}
     for fp in flat:
         m = ILLUMINA_RE.match(os.path.basename(fp))
         if not m:
@@ -60,8 +62,12 @@ def scan_batch(batch_dir):
         if m.group("lane") not in si.lanes:
             si.lanes.append(m.group("lane"))
         (si.r1 if m.group("read") == "1" else si.r2).append(fp)
+    return samples
 
-    # 布局 2：外送子目录 <样本名>/<样本名>_R1.fastq.gz
+
+def scan_outsourced_subdir(flat, subdirs):
+    """布局 2：外送子目录 <样本名>/<样本名>_R1.fastq.gz（样本名=子目录名）"""
+    samples = {}
     for dp in subdirs:
         r1s, r2s = [], []
         for name in sorted(os.listdir(dp)):
@@ -70,13 +76,48 @@ def scan_batch(batch_dir):
                 (r1s if m.group("read") == "1" else r2s).append(os.path.join(dp, name))
         if not r1s and not r2s:
             continue
-        sm = os.path.basename(dp)
-        if sm in samples:
-            invalid[sm] = "样本名与平铺布局冲突"
-            continue
-        si = SampleInfo(sm, "outsourced")
+        si = SampleInfo(os.path.basename(dp), "outsourced")
         si.r1, si.r2 = r1s, r2s
-        samples[sm] = si
+        samples[si.sample] = si
+    return samples
+
+
+def scan_outsourced_flat(flat, subdirs):
+    """布局 3：外送平铺 <样本名>_R1.fastq.gz（文件直接放批次目录）"""
+    samples = {}
+    for fp in flat:
+        m = FLAT_OUTSOURCED_RE.match(os.path.basename(fp))
+        if not m:
+            continue
+        sm = m.group("sample")
+        si = samples.setdefault(sm, SampleInfo(sm, "outsourced_flat"))
+        (si.r1 if m.group("read") == "1" else si.r2).append(fp)
+    return samples
+
+
+LAYOUT_SCANNERS = (scan_illumina_flat, scan_outsourced_subdir, scan_outsourced_flat)
+
+
+def scan_batch(batch_dir):
+    """扫描批次目录 → (有效样本 dict, 无效样本 dict{sm: reason})。
+    布局按 LAYOUT_SCANNERS 依序识别：先认者优先，同一样本名被后到的
+    布局再认出 → 后者记冲突无效；不匹配任何布局的文件不构成样本（忽略）。
+    输入校验：R1/R2 文件数不一致、单端、0 字节 → 标记无效并跳过。"""
+    samples, invalid = {}, {}
+    flat, subdirs = [], []
+    for name in sorted(os.listdir(batch_dir)):
+        p = os.path.join(batch_dir, name)
+        if os.path.isfile(p):
+            flat.append(p)
+        elif os.path.isdir(p):
+            subdirs.append(p)
+
+    for scan in LAYOUT_SCANNERS:
+        for sm, si in scan(flat, subdirs).items():
+            if sm in samples:
+                invalid[sm] = f"样本名与{LAYOUT_LABELS.get(samples[sm].layout, samples[sm].layout)}布局冲突"
+            elif sm not in invalid:
+                samples[sm] = si
 
     # 校验
     for sm, si in sorted(samples.items()):
@@ -141,10 +182,12 @@ def verify_md5(batch_dir, logger, workers=4):
                 else:
                     n_bad += 1
                     # 样本名按布局推导（RUN-33 修复：平铺布局曾误取批次目录名，
-                    # 致 md5_failed 与 valid 无交集——失败样本从未被剔除）
+                    # 致 md5_failed 与 valid 无交集——失败样本从未被剔除；
+                    # RUN-36 补外送平铺式）
                     if os.path.normpath(os.path.dirname(p)) == os.path.normpath(batch_dir):
-                        m = ILLUMINA_RE.match(os.path.basename(p))
-                        failed_samples.add(m.group(1) if m else os.path.basename(p))
+                        m = ILLUMINA_RE.match(os.path.basename(p)) \
+                            or FLAT_OUTSOURCED_RE.match(os.path.basename(p))
+                        failed_samples.add(m.group("sample") if m else os.path.basename(p))
                     else:
                         failed_samples.add(os.path.basename(os.path.dirname(p)))
                     logger.error(f"md5 校验失败: {p} 期望 {md5} 实际 {actual} ({e_})")

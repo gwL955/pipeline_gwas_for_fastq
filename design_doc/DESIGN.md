@@ -3,8 +3,8 @@
 ```yaml
 # ---- design-meta（机器可解析锚点，勿手改格式；版本规则见 §0）----
 doc: GWAS-pipeline-design
-version: 2.11.0
-updated: 2026-09-16
+version: 2.12.0
+updated: 2026-09-17
 owner_human: gewenlong
 owner_machine: ZCode(GLM)
 source_of_truth:
@@ -67,7 +67,7 @@ consistency_check: pipeline/check_design.py      # TH 表 ↔ config.py 防漂�
 | REQ-03 | 资源自适应：探测(cgroup/WSL2/affinity)→分档推导→内存收紧→钳位；禁写死参数；快速失败；计划透明（推导表见 §5.3） | ✅ 完成 | RUN-10~14；DEC-03 |
 | REQ-04 | 幂等断点续跑：产物存在且非空即 SKIP，只补缺失（含 .tbi/.metrics/.table；各步幂等键见 §3.1） | ✅ 完成 | RUN-09（31 SKIP 结果一致） |
 | REQ-05 | 批次独立 + 多批次失败隔离；任一批失败退出码非零（退出码语义见 §7.3） | ✅ 完成 | RUN-07/08 |
-| REQ-06 | 输入校验：两种布局自动识别；R1/R2 不匹配/单端/0字节/命名无效标记跳过；md5sum.txt 并行校验（失败 P0 阻断） | ✅ 完成 | tests/test_scanner.py |
+| REQ-06 | 输入校验：三种布局自动识别（Illumina 平铺/外送子目录/外送平铺，DEC-23）；R1/R2 不匹配/单端/0字节/命名无效标记跳过；md5sum.txt 并行校验（失败 P0 阻断） | ✅ 完成 | tests/test_scanner.py |
 | REQ-07 | 安全边界：0_raw_data/back 只读；产物仅写 results/ 与 Output/ 交付目录 | ✅ 完成 | 全程无违规写入 |
 | REQ-08 | 钉钉通知：markdown 官方子集、启动/全步骤里程碑/完成/失败、**P0/P1/P2 三级分级（§5.2）**、失败降级不中断 | ✅ 完成 | RUN-16/33；DEC-08/21 |
 | REQ-10 | CLI 参数全集（§7.2）+ `--version` 版本溯源 | ✅ 完成 | run_pipeline.py argparse |
@@ -94,7 +94,7 @@ $WORK/
     ├── logger.py         双通道日志 + capture_stdio tee（缓冲模式延迟落盘）
     ├── runner.py         容器命令封装：幂等 SKIP/实时输出/超时 Timer kill/返回码/产物校验/统计超时
     ├── resource.py       ★ 资源探测与规划（cpu=min(os/affinity/cgroup)；mem=min(MemAvailable/cgroup)）
-    ├── scanner.py        两种布局扫描 + md5（样本名按布局推导）+ Lane 合并 + samples.tsv
+    ├── scanner.py        三种布局扫描（识别器独立函数 LAYOUT_SCANNERS，DEC-23）+ md5（样本名按布局推导）+ Lane 合并 + samples.tsv
     ├── dingtalk.py       markdown 通知 + 三重规范化（表格降级/\n→\n\n/截断）+ 未配置降级
     ├── alerts.py         P0/P1/P2 三级检查 + 里程碑消息构造
     ├── report.py         run_report/run_summary
@@ -113,7 +113,7 @@ $WORK/
 
 | Step | 操作（容器工具与关键语义） | 产物〔幂等键〕 | 分级检查 |
 | --- | --- | --- | --- |
-| **0 清点与合并** | 扫描两种布局（Illumina 平铺 `<样本>_S#_L###_R[12]_001.fastq.gz` / 外送 `<样本>/<样本>_R[12].fastq.gz`）→ `--samples` 白名单过滤 → **样本名白名单 `[A-Za-z0-9_.-]`（DEC-19）** → md5 并行校验 → 磁盘/依赖预检 → 多 Lane `cat` 合并（并行）→ samples.tsv | `fastq_merged/<样本>_R{1,2}.fastq.gz`、`samples.tsv` | P0：样本名非法/依赖缺失/磁盘不足/md5 损坏（统一 raise 中断批次）；P1：合并失败（样本终止）；启动通知含全部预检结论 |
+| **0 清点与合并** | 扫描三种布局（Illumina 平铺 `<样本>_S#_L###_R[12]_001.fastq.gz` / 外送子目录 `<样本>/<样本>_R[12].fastq.gz` / 外送平铺 `<样本>_R[12].fastq.gz`，DEC-23 识别器独立函数依序应用、先认者优先）→ `--samples` 白名单过滤 → **样本名白名单 `[A-Za-z0-9_.-]`（DEC-19）** → md5 并行校验 → 磁盘/依赖预检 → 多 Lane `cat` 合并（并行）→ samples.tsv | `fastq_merged/<样本>_R{1,2}.fastq.gz`、`samples.tsv` | P0：样本名非法/依赖缺失/磁盘不足/md5 损坏（统一 raise 中断批次）；P1：合并失败（样本终止）；启动通知含全部预检结论 |
 | **1 QC+修剪** | fastqc(raw) → fastp（`-l 36`、adapter 自动检测，线程=fastp_threads）→ fastqc(trim) + **Adapter raw→trim 复检** | `fastq_clean/<样本>_R{1,2}.fastq.gz`〔fastp html/json〕、`qc/fastqc_raw|fastqc_trim|fastp`〔fastqc zip〕 | P1：reads<1M（TH-33）；P2：保留率<80/Q30<85（TH-03/04）、NTC reads 占比>1%（TH-34） |
 | **2 比对** | `bwa-mem2 mem -K 100000000 -Y -R '@RG…SM:样本' | samtools sort -@T -m SORT_MEM`（管道流式）→ `samtools index` → flagstat/stats | `bam/<样本>/<样本>.sort.bam(+.bai)`〔sort.bam+.bai〕、`qc/flagstat|stats`〔对应文件〕 | P1：mapped<90 QC 口径（TH-05，报错不中断）；P2：mapped<95/pp<85（TH-06/07） |
 | **3 去重** | `gatk MarkDuplicates` → markdup.bam + metrics → flagstat/stats（去重前 duplicates 行不采集） | `bam/<样本>/<样本>.markdup.bam`〔markdup.bam+metrics〕 | P2：dup>30%（TH-09） |
@@ -149,6 +149,7 @@ cohort 级与 MultiQC 串行。样本失败即隔离（记入 failed，退出后
 | DEC-20 | **process_batch 步骤方法化**：Step 0-6 拆为 `BatchCtx.step0_scan~step6_summary_delivery` 七方法，编排层仅 ~40 行；跨步骤状态挂 ctx（bdata/merged/excluded/cohort_stats/notify_on/run_date/_t0） | 原单函数 ~700 行难读难测（RUN-31）；MultiQC 时序锚锚定 step6 方法源码 |
 | DEC-21 | **三级分级体系**：P0=阻断级（严重影响分析→raise 中断批次，退出码 1）；P1=严重（执行失败样本隔离/NTC 污染/mapped<90，报错不中断）；P2=质量提示（阈值越界/口径存疑，只记录）。质量类一律不中断 | 用户决定：P0 应为严重影响分析的阻断级；质量只报错不中断（RUN-33） |
 | DEC-22 | **审计项落地**：P0 Step 间磁盘复查（disk_guard）；P1 reads<1M、PASS 裁决 VCF 空结果；P2 NTC reads 占比/批次深度 CV/recal 观测数（TH-33~36） | RUN-33 审计清单经用户圈选实施（RUN-34） |
+| DEC-23 | **输入布局识别器独立函数化**：每式布局一个 `scan_*` 函数（统一签名 `flat, subdirs → {样本: SampleInfo}`）登记于 `LAYOUT_SCANNERS` 依序应用——先认者优先、同名冲突记无效、不匹配任何布局的文件忽略；新增输入格式只追加函数不改 `scan_batch` 主体。v2.12.0 起三种布局：Illumina 平铺（样本名=去 `_S#_L###_R[12]_001` 尾）、外送子目录（样本名=子目录名）、**外送平铺（样本名=去 `_R[12]` 尾，RUN-36 新增）** | 外送交付常直接平铺于批次目录，此前两种识别器都不认 → 整批"无有效样本"静默跳过且无原因可查（RUN-36 事故）；识别器与 Illumina 式整名锚定互斥（结尾 `_R#.fastq.gz` 与 `_001.fastq.gz` 不可能兼得） |
 
 ## 5. 统一口径与阈值总表（TH = config.py 镜像）<!-- HUMAN 可改值；MACHINE 同步 config 后过校验 -->
 
@@ -332,20 +333,20 @@ results/260422_20260914/                     Output/260422_20260914/
 | --- | --- |
 | test_runner.py | tool 拼装/binds、cpath 映射、rt 绝对路径自包含解析、PATH 兜底、幂等 SKIP、dry-run 不执行、超时 kill、统计命令 timeout=600 传递 |
 | test_resource.py | sort -m 整数 MB、-Xmx 格式、low/high 档精确值、快速失败（mock 探测）、计划表、workers 覆盖 |
-| test_scanner.py | 两种布局、无效输入（R1R2 不匹配/0 字节）、md5、合并（真实与 dry-run）、samples.tsv 列 |
+| test_scanner.py | 三种布局、无效输入（R1R2 不匹配/0 字节）、布局互斥与同名冲突、md5（含外送平铺样本名推导）、合并（真实与 dry-run）、samples.tsv 列 |
 | test_dingtalk.py | 表格降级、换行规范化、截断、发送成功落日志（mock urlopen） |
 | test_alerts.py | P0/P1/P2 三级判定全集（含 TH-33~36 新检查）、最差级别、里程碑模板 |
 | test_parsers.py | fastqc/fastp(json 真实结构)/markdup/hsmetrics/flagstat/stats/bcftools/mosdepth/recal 观测数 |
 | test_variant_post.py | 矩阵 `./.` 裁决、重建只换 GT、GT 列显式映射、norm outputs 口径 |
 | test_envfile.py | .env 解析语法、三源优先级、webhook 默认空、防回潮锚（源码无 access_token=）、降级 |
-| test_misc.py | tee 自动落盘、目录命名、跨午夜锚、全流程 dry-run success+零落盘锚、样本名 P0 阻断锚、--input 覆盖锚、--version、MultiQC 时序锚（step6 方法）、交付导出（Output 命名/md5sum/MANIFEST/MultiQC extra/幂等）、INDEX 累积锚、disk_guard |
+| test_misc.py | tee 自动落盘、目录命名、跨午夜锚、全流程 dry-run success+零落盘锚、样本名 P0 阻断锚、--input 覆盖锚、--version、MultiQC 时序锚（step6 方法）、交付导出（Output 命名/md5sum/MANIFEST/MultiQC extra/幂等）、INDEX 累积锚、disk_guard、外送平铺布局端到端锚（RUN-36） |
 
 `./run_tests.sh` = unittest 全量 + `check_design.py`（TH↔config + 版本双源）；
 CI（.github/workflows/ci.yml）在 py3.10/3.12 矩阵执行。
 
 ### 9.2 迁移/重建验证顺序（DEC-12）
 
-1. `./run_tests.sh` 全绿（全部用例数见 §9.1 各文件，当前共 103）
+1. `./run_tests.sh` 全绿（全部用例数见 §9.1 各文件，当前共 109）
 2. `cp .env.example .env` 填 webhook → `python3 run_pipeline.py --notify-test`（连通性）
 3. `python3 run_pipeline.py --dry-run --batch <小批次>`（容器/参考文件/路径与资源计划）
 4. `python3 run_pipeline.py --resource-profile low --dry-run`（低配档口径）
@@ -353,7 +354,7 @@ CI（.github/workflows/ci.yml）在 py3.10/3.12 矩阵执行。
 
 ### 9.3 重建完成判据
 
-103 用例 + check_design 全绿；`--version` 输出与本文档 version 一致；dry-run 零落盘；
+109 用例 + check_design 全绿；`--version` 输出与本文档 version 一致；dry-run 零落盘；
 单批次实跑 success 且 Step 6 交付目录含 VCF+tbi+MultiQC，`md5sum -c` 全过。
 
 ## 10. 变更日志（CHANGELOG）<!-- 人机共写：每方改动各记一行 -->
@@ -390,6 +391,8 @@ CI（.github/workflows/ci.yml）在 py3.10/3.12 矩阵执行。
 | 2.10.0 | 2026-09-16 | 机 | DEC-22：disk_guard/四新检查/TH-33~36；CI 修复 disk_guard 路径回溯；测试 96→103（RUN-34） |
 | 2.11.0 | 2026-09-16 | 人 | 设计文档合并为**自含重建规格**：当前实际/修改情况/关键点全部并入；废弃目标删除（正文仅陈述现行为，沿革归 CHANGELOG）；目标=可据本文档从头重建项目 |
 | 2.11.0 | 2026-09-16 | 机 | 新增 §3.1 Step 0-6 流程规格表（操作/幂等键/分级）、§5.2 分级告警体系全表、§5.3 资源推导、§7 配置与接口（.env/CLI/退出码）、§9 测试与验收（含 9.3 重建完成判据）、§6 目录树；REQ-08/12 更新为现口径；DEC 表按编号重排；TH/REQ/DEC 编号锚全部稳定不变；RUN-35 |
+| 2.12.0 | 2026-09-17 | 人 | 新增第三种输入布局识别：外送平铺（`<批次>/<样本>_R[12].fastq.gz` 直接平铺于批次目录）；识别逻辑拆为独立函数以防后续新格式 |
+| 2.12.0 | 2026-09-17 | 机 | DEC-23：scan_illumina_flat/scan_outsourced_subdir/scan_outsourced_flat 三识别器登记 LAYOUT_SCANNERS（先认者优先、同名冲突记无效）；顺带修 verify_md5 平铺外送样本名推导（同 RUN-33 病根）；samples.tsv note 增"外送平铺"标签；测试 103→109（布局/互斥/冲突/md5 推导/E2E 锚）；RUN-36 |
 
 ## 11. 证据索引 <!-- MACHINE -->
 
@@ -398,7 +401,7 @@ CI（.github/workflows/ci.yml）在 py3.10/3.12 矩阵执行。
 | 运行台账（每轮） | pipeline/design_doc/RUN_HISTORY.md |
 | 验收运行（0_raw_data_test） | results/260422_20260914/、results/260422_20260916/ 等（运行日志在各批次 logs/） |
 | 交付 | Output/<批次>_<日期>/ + INDEX.md（累积） |
-| 测试集与 CI | pipeline/tests/（103 用例）+ run_tests.sh + .github/workflows/ci.yml |
+| 测试集与 CI | pipeline/tests/（109 用例）+ run_tests.sh + .github/workflows/ci.yml |
 | 使用说明/与笔记差异 | pipeline/README.md |
 | 环境参数 | pipeline/.env（密钥，600）+ pipeline/.env.example（模板） |
 | 命令参考快照 | pipeline/design_doc/notes_code_reference.md |

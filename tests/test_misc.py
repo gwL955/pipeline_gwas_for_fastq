@@ -140,6 +140,30 @@ class TestLoggerTee(unittest.TestCase):
             self.assertFalse(os.path.exists(res),
                              "dry-run 不得在 results/ 落任何目录/文件")
 
+    def test_full_flow_dry_run_outsourced_flat(self):
+        """★ 外送平铺布局端到端锚（RUN-36/DEC-23）：<样本>_R{1,2}.fastq.gz 直接放
+        批次目录须走完全流程 success——此前两种识别器都不认，整批静默 skipped"""
+        import subprocess
+        with tempfile.TemporaryDirectory() as td:
+            bdir = os.path.join(td, "in", "260917")
+            os.makedirs(bdir)
+            for r in ("R1", "R2"):
+                with open(os.path.join(bdir, f"NA12878_{r}.fastq.gz"), "wb") as f:
+                    f.write(b"@x\nACGT\n+\nIIII\n")
+            env = {**os.environ, **_dep_env(td),
+                   "GWAS_RESULTS": os.path.join(td, "results")}
+            r = subprocess.run(
+                [sys.executable,
+                 os.path.join(os.path.dirname(os.path.dirname(
+                     os.path.abspath(__file__))), "run_pipeline.py"),
+                 "--dry-run", "--resource-profile", "low",
+                 "--input", os.path.join(td, "in")],
+                env=env, capture_output=True, text=True, timeout=90)
+            self.assertEqual(r.returncode, 0, r.stdout[-800:])
+            self.assertIn("批次 260917: success", r.stdout)
+            self.assertIn("有效样本 1 个", r.stdout)
+            self.assertFalse(os.path.exists(os.path.join(td, "results")))
+
     def test_bad_sample_name_rejected(self):
         """★ 样本名白名单 P0 阻断锚（DEC-19/RUN-32）：非常规字符（如 ;）→
         P0 级错误直接中断分析（退出码非零、批次 failed）——样本名进入 shell

@@ -5,8 +5,8 @@
 
 ## 一、总览 <!-- MACHINE -->
 
-- 累计 35 轮（RUN-01~35），其中失败调试轮 7（R01/R02/R03/R04/R06/R11/R12/R22 前半段中计为 7 个失败轮次）、
-  成功验收轮含最终交付链 R05→R08→R15→R19→R20，变更回归轮 R21（v2.0.0）、R22/23（v2.0.1/2）、R24（v2.1.0）、R25（v2.1.1）、R26（v2.2.0）、R27（v2.3.0）、R28（v2.4.0 文档清理）、R29（v2.5.0 日志分析修复）、R30（v2.6.0 仓库工程化）、R31（v2.7.0 五项修改）、R32（v2.8.0 样本名 P0 阻断）、R33（v2.9.0 分级体系三级化）、R34（v2.10.0 审计项落地）、R35（v2.11.0 设计文档自含化）。
+- 累计 36 轮（RUN-01~36），其中失败调试轮 7（R01/R02/R03/R04/R06/R11/R12/R22 前半段中计为 7 个失败轮次）、
+  成功验收轮含最终交付链 R05→R08→R15→R19→R20，变更回归轮 R21（v2.0.0）、R22/23（v2.0.1/2）、R24（v2.1.0）、R25（v2.1.1）、R26（v2.2.0）、R27（v2.3.0）、R28（v2.4.0 文档清理）、R29（v2.5.0 日志分析修复）、R30（v2.6.0 仓库工程化）、R31（v2.7.0 五项修改）、R32（v2.8.0 样本名 P0 阻断）、R33（v2.9.0 分级体系三级化）、R34（v2.10.0 审计项落地）、R35（v2.11.0 设计文档自含化）、R36（v2.12.0 外送平铺布局）。
 - 关键修复链：binds 遮蔽 → sort -m 格式 → norm 索引 → GT 列序互换 → cgroup 资源边界 →
   对账口径 → 2 个测试集抓出的潜伏 bug。
 
@@ -49,6 +49,7 @@
 | RUN-33 | 09-16 14:5x | 用户指示：P0 收敛为严重影响分析（直接中断）；其余原 P0/P1 降 P1/P2；质量问题只报错不中断；输出审计清单 | ✅ | DEC-21 三级体系：P0=阻断级统一 raise（依赖/样本名/**磁盘**/**md5** 新增中断，退出码 1）；P1=执行失败样本隔离+NTC 污染+mapped<90（**不再判样本失败**，qc_judgement 改记录+P1 通知）；P2=全部质量阈值与对账（alerts check_* 全量降级，LEVEL_ORDER 三级，通知 tag 三级化）；test_alerts 断言全量更新、_dep_env 加 GWAS_DISK_MIN_FREE_GB=0（磁盘 P0 测试豁免）。**审计结论（缺失/建议项）**：①对账·数量机械降 P2 但语义属结果完整性，建议升 P1；②fastqc 模块级 warn/fail（除 Adapter 复检外）未入分级通知——建议 P2 汇总；③singletons>1% 仅日志——建议 P2；④样本 reads 绝对量过低（<1M）无检查——建议 P1；⑤per-sample PASS VCF 0 记录无检查——建议 P1；⑥批次内深度离散度（CV）无检查——建议 P2；⑦运行中磁盘复查仍缺失——建议 P1；⑧NTC reads 占比异常无检查——建议 P2。顺带修复 scanner.verify_md5 样本名推导：平铺布局曾误取批次目录名，致 md5_failed 与 valid 无交集——失败样本从未被剔除（历史潜伏，P0 化后才显形）；md5 P0 实跑验证指名 NA12878、批次即败、退出码 1。96 tests+check_design 全绿 | design_doc/DESIGN.md DEC-21/CHANGELOG 2.9.0；alerts.py |
 | RUN-34 | 09-16 15:1x | 用户圈选 RUN-33 审计项实施：P0 磁盘复查 / P1 reads+空VCF / P2 NTC reads+深度CV+recal | ✅ | DEC-22：①BatchCtx.disk_guard——process_batch 每个 Step 后复查，低于 DISK_MIN_FREE_GB 即 raise 终止批次（dry-run 跳过，测试 GWAS_DISK_MIN_FREE_GB=0 豁免不变）；②step1 采集 after_reads→check_reads_low P1（<1M）+_ntc_reads_anoms（NTC/批次中位 >1% P2）；③step4 parse_recal_observations（RecalTable1 M 行求和，真实 NA12878=580,376,919 健康）<1e5 P2；④step6 裁决 VCF count_records==0 P1 + check_depth_cv（CV>0.5 P2）；TH-33~36 入 DESIGN 并加入 check_design 镜像集；测试 96→103（四新检查/recal 解析 fixture/disk_guard 锚）全绿；真实 --step 0 冒烟。**CI 首推失败→修复**：disk_guard 在 RESULTS_ROOT 不存在时（干净克隆/新机器首轮）直接 disk_usage 崩溃——补祖先回溯（与开跑前检查同策略），干净树+6G cgroup 双模拟复验全绿后复推 | design_doc/DESIGN.md DEC-22/TH-33~36；alerts.py |
 | RUN-35 | 09-16 15:3x | 用户要求：当前实际/修改情况/关键点合并入设计文档；废弃目标删除；目标=可据文档从头重建项目 | ✅ | DESIGN.md 整体重写为自含重建规格（2.11.0）：新增 §3.1 Step 0-6 流程规格表（操作/容器语义/幂等键/分级检查）、§5.2 分级告警体系全表（P0×5/P1×7/P2×9）、§5.3 资源推导、§5.4 通知时机、§6 目录树、§7 配置与接口（.env 键表+三源优先级/CLI 全参/退出码语义）、§9 测试与验收（用例构成/迁移顺序/9.3 重建完成判据）；REQ-08/12 更新现口径；DEC 表按编号重排（22 项全保留）；TH×32/REQ×16/DEC 编号锚全部稳定；历史沿革收敛于 §10 CHANGELOG；config.PIPELINE_VERSION 同步 2.11.0（check_design 双源校验通过） | design_doc/DESIGN.md v2.11.0 |
+| RUN-36 | 09-17 11:2x→12:3x | 用户报 `--input 0_raw_data_test/`（260917 批）报"无任何有效样本"跳过 → 排查确认：外送交付数据直接平铺于批次目录（`<长前缀样本名>_R1.fastq.gz`），两种识别器都不认（外送式要求子目录、Illumina 式要求 `_S#_L###_` 命名），未识别文件静默忽略故无原因可查。用户指示：新增该布局识别（识别部分独立函数化）、补测试、同步文档、推 GitHub | ✅ | DEC-23：布局识别器独立函数化——scan_illumina_flat/scan_outsourced_subdir/scan_outsourced_flat 统一签名登记 LAYOUT_SCANNERS，scan_batch 只做编排（先认者优先、同名冲突记无效、其余校验逻辑不变）；新识别器 FLAT_OUTSOURCED_RE 整名锚定与 Illumina 式互斥（结尾 `_R#.fastq.gz` vs `_001.fastq.gz` 不可能兼得）；顺带修 verify_md5 平铺外送样本名推导（原 fallback 取整个文件名，md5_failed 与 valid 无交集，同 RUN-33 病根）；samples.tsv note 增"外送平铺"标签。验证：109 tests+check_design 全绿；真实 260917 dry-run 全流程 success（3 样本/0.87GB）；`--step 0` 实跑 success（合并产物字节对齐源文件）；--notify off 全程无计划外钉钉通知 | design_doc/DESIGN.md DEC-23/CHANGELOG 2.12.0；tests/test_scanner.py、test_misc.py |
 
 ## 三、指标速查（最终有效轮：RUN-08/15 数据）<!-- MACHINE -->
 

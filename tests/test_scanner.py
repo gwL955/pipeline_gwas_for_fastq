@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""scanner.py 单测（两种输入布局解析、无效样本标记、md5 校验、Lane 合并与 dry-run 行为）"""
+"""scanner.py 单测（三种输入布局解析、无效样本标记、布局冲突、md5 校验、Lane 合并与 dry-run 行为）"""
 
 import os
 import sys
@@ -42,6 +42,49 @@ class TestScanLayouts(unittest.TestCase):
             self.assertEqual(list(valid), ["L200100435"])
             self.assertEqual(valid["L200100435"].layout, "outsourced")
 
+    def test_outsourced_flat_layout(self):
+        """★ 外送平铺布局（RUN-36/DEC-23）：<样本>_R{1,2}.fastq.gz 直接放批次目录。
+        真实事故：外送交付平铺数据两种识别器都不认 → 整批"无有效样本"静默跳过"""
+        with tempfile.TemporaryDirectory() as td:
+            sm = "SURFS45391-260810-HS02-U241-20260811cap18ZFD-TG018"   # 真实交付名截取
+            for r in ("R1", "R2"):
+                _touch(os.path.join(td, f"{sm}_{r}.fastq.gz"))
+            valid, invalid = scanner.scan_batch(td)
+            self.assertEqual(list(valid), [sm])
+            self.assertEqual(valid[sm].layout, "outsourced_flat")
+            self.assertEqual(len(valid[sm].r1), 1)
+            self.assertEqual(len(valid[sm].r2), 1)
+            self.assertIn("外送平铺", valid[sm].note())
+            self.assertEqual(invalid, {})
+
+    def test_outsourced_flat_r1_only_invalid(self):
+        with tempfile.TemporaryDirectory() as td:
+            _touch(os.path.join(td, "SM_R1.fastq.gz"))          # 缺 R2
+            valid, invalid = scanner.scan_batch(td)
+            self.assertEqual(valid, {})
+            self.assertIn("不一致", invalid["SM"])
+
+    def test_illumina_name_not_mistaken_as_flat(self):
+        """互斥锚：Illumina 命名（尾 _001.fastq.gz）不得同时被外送平铺识别器认出"""
+        with tempfile.TemporaryDirectory() as td:
+            for lane in ("L001", "L002"):
+                for r in ("R1", "R2"):
+                    _touch(os.path.join(td, f"SM_S1_{lane}_{r}_001.fastq.gz"))
+            valid, invalid = scanner.scan_batch(td)
+            self.assertEqual(list(valid), ["SM"])               # 唯一样本，无第二识别结果
+            self.assertEqual(valid["SM"].layout, "illumina")
+            self.assertEqual(invalid, {})
+
+    def test_layout_conflict_marks_invalid(self):
+        """同一样本名被多种布局认出 → 先认者优先，后到者记冲突无效（历史行为保持）"""
+        with tempfile.TemporaryDirectory() as td:
+            for r in ("R1", "R2"):
+                _touch(os.path.join(td, f"SM_S1_L001_{r}_001.fastq.gz"))
+                _touch(os.path.join(td, f"SM_{r}.fastq.gz"))    # 外送平铺同文名
+            valid, invalid = scanner.scan_batch(td)
+            self.assertEqual(list(valid), ["SM"])               # illumina 先认
+            self.assertIn("冲突", invalid["SM"])
+
     def test_invalid_r1r2_mismatch(self):
         with tempfile.TemporaryDirectory() as td:
             _touch(os.path.join(td, "SM_S1_L001_R1_001.fastq.gz"))   # 只有 R1
@@ -78,6 +121,27 @@ class TestMd5(unittest.TestCase):
             failed, n = scanner.verify_md5(td, _L(), workers=2)
             self.assertEqual(n, 2)
             self.assertIn("SM1", failed)      # 坏的那条 → 样本列入失败集
+
+    def test_verify_md5_flat_outsourced_sample_name(self):
+        """★ md5 失败样本名推导覆盖外送平铺（RUN-36）：平铺文件样本名=去 _R# 尾——
+        曾误取整个文件名，致 md5_failed 与 valid 无交集（P0 失效，同 RUN-33 病根）"""
+        import hashlib
+        with tempfile.TemporaryDirectory() as td:
+            _touch(os.path.join(td, "SM1_R1.fastq.gz"), b"aaaa")
+            _touch(os.path.join(td, "SM1_R2.fastq.gz"), b"bbbb")
+            bad, good = "0" * 32, hashlib.md5(b"bbbb").hexdigest()
+            with open(os.path.join(td, "md5sum.txt"), "w", encoding="utf-8") as f:
+                f.write(f"{bad}  SM1_R1.fastq.gz\n{good}  SM1_R2.fastq.gz\n")
+
+            class _L:
+                def info(self, *a): pass
+                def error(self, *a): pass
+                def result(self, *a): pass
+                def warn(self, *a): pass
+            failed, n = scanner.verify_md5(td, _L(), workers=2)
+            self.assertEqual(n, 2)
+            self.assertIn("SM1", failed)
+            self.assertNotIn("SM1_R1.fastq.gz", failed)         # 不得是整个文件名
 
 
 class TestMerge(unittest.TestCase):
