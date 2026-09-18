@@ -18,7 +18,9 @@ import glob
 import json
 import time
 import shutil
+import zipfile
 import argparse
+import tempfile
 import threading
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -1213,11 +1215,21 @@ def main():
     args = parse_args()
 
     if args.notify_test:
+        # 企业机器人连通性（DEC-24）：markdown 链路 + 文件链路（媒体上传权限）
         ok, err = dingtalk.send_markdown(
             "[GWAS] 测试通知",
             "#### [GWAS] 流程测试通知\n > 这是 GWAS pipeline 的钉钉通知测试\n"
             "| 项目 | 值 |\n| --- | --- |\n| 状态 | OK |")
-        print(f"notify-test: {'发送成功' if ok else f'发送失败: {err}'}")
+        file_note = ""
+        if ok:
+            with tempfile.TemporaryDirectory() as td:
+                zp = os.path.join(td, "notify_test.zip")
+                with zipfile.ZipFile(zp, "w") as zf:
+                    zf.writestr("readme.txt", "GWAS pipeline 钉钉文件链路测试\n")
+                fok, ferr = dingtalk.send_file(zp)
+            file_note = "" if fok else f"；文件链路失败: {ferr}"
+            ok = fok
+        print(f"notify-test: {'发送成功（markdown+文件）' if ok else f'发送失败: {err}{file_note}'}")
         sys.exit(0 if ok else 1)
 
     # 先接管 stdio（缓冲模式）：资源计划表、快速失败报错、任何未捕获输出
@@ -1326,6 +1338,28 @@ def main():
         summary["delivery_index"] = idx
         if last_summary_path and not args.dry_run:
             report_mod.write_run_summary(summary, last_summary_path)
+
+    # 交付文件打包推送钉钉（DEC-24，v2.15.0）：**批次全部结束后统一发送**——
+    # 多批次逐批推会被通知淹没；每个 success 批次的 Output 交付目录 → 临时 zip
+    # （钉钉文件卡片仅支持 zip 等白名单后缀且 ≤20MB）→ 说明消息 + 文件卡片。
+    # 发送失败只降级 WARN（通知链路问题不影响分析结果与退出码）
+    if args.notify == "on" and not args.dry_run:
+        for batch, d in sorted(summary["batches"].items()):
+            ddir = d.get("artifacts", {}).get("delivery_dir")
+            if d.get("status") != "success" or not ddir or not os.path.isdir(ddir):
+                continue
+            n_sm = len(d.get("samples", {}).get("calling")
+                       or d.get("samples", {}).get("valid") or [])
+            main_logger.step(f"▶ 交付 zip 推送钉钉: Output/{os.path.basename(ddir)}")
+            dingtalk.send_zip_dir(
+                ddir, f"[GWAS] {batch} 交付文件",
+                f"#### 批次 {batch} 交付文件"
+                f"\n\n> {len(d['samples']['valid'])} 样本｜{n_sm} 进入联合检测"
+                f"\n\n- **目录**：`Output/{os.path.basename(ddir)}/`"
+                f"\n\n- **内容**：每样本 `*.PASS.adjudicated.vcf.gz(+.tbi)`、"
+                f"MultiQC 汇总报告、md5sum.txt（可 `md5sum -c` 校验）、MANIFEST.tsv"
+                f"\n\n- **说明**：zip 为目录原样打包，解压后校验 md5 再取用",
+                logger=main_logger)
 
     # 总通知
     if args.notify == "on" and not args.dry_run and len(batches) > 1:

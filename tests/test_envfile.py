@@ -169,19 +169,24 @@ class TestNoHardcodedEnvParams(unittest.TestCase):
         self.assertNotIn("access_token=", src)
         self.assertNotIn("oapi.dingtalk.com", src)
 
-    def test_send_markdown_skips_network_without_webhook(self):
-        """未配置时 (False, 指引) 且不构造网络请求"""
-        env = {k: v for k, v in os.environ.items() if k != "DINGTALK_WEBHOOK"}
-        with mock.patch.dict(os.environ, env, clear=True), \
-                mock.patch.object(config, "DINGTALK_WEBHOOK", ""):
+    def test_send_markdown_skips_network_without_credentials(self):
+        """未配置企业凭证时 (False, 指引) 且不构造网络请求（v2.15.0 语义；
+        防回潮：测试绝不触网——曾因 mock token 缓存泄漏真实请求钉钉 API）"""
+        with mock.patch.object(config, "DINGTALK_CLIENT_ID", ""), \
+                mock.patch.object(config, "DINGTALK_CLIENT_SECRET", ""), \
+                mock.patch.object(config, "DINGTALK_CONVERSATION_ID", ""), \
+                mock.patch.object(dingtalk, "_request") as req:
             ok, err = dingtalk.send_markdown("t", "text")
         self.assertFalse(ok)
-        self.assertIn("DINGTALK_WEBHOOK", err)
+        self.assertIn("DINGTALK_CLIENT_ID", err)
         self.assertIn(".env", err)
+        req.assert_not_called()
 
-    def test_notify_without_webhook_no_exception(self):
-        with mock.patch.object(config, "DINGTALK_WEBHOOK", ""):
-            dingtalk._no_webhook_warned = False
+    def test_notify_without_credentials_no_exception(self):
+        with mock.patch.object(config, "DINGTALK_CLIENT_ID", ""), \
+                mock.patch.object(config, "DINGTALK_CLIENT_SECRET", ""), \
+                mock.patch.object(config, "DINGTALK_CONVERSATION_ID", ""):
+            dingtalk._no_config_warned = False
             dingtalk.notify("t", "text")   # 不抛异常即通过（降级不中断流程）
 
 

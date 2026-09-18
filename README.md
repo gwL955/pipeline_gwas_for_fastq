@@ -59,21 +59,22 @@ run_<ts>.log，`nohup … &` 后台运行不再向 nohup.out 倾倒（启动错�
 
 ## 1.2 环境配置（.env，v2.2.0 起）
 
-**环境参数（钉钉 webhook 地址、目录覆盖等）不写在代码里**，统一放
+**环境参数（钉钉企业机器人凭证、目录覆盖等）不写在代码里**，统一放
 `pipeline/.env`（与代码同目录，模板 `pipeline/.env.example`；
 `singularity/` 镜像目录仍在 pipeline 同级，属目录约定不走 `.env`）。
 程序启动时自动加载，**优先级：进程环境变量 > `.env` > `config.py` 内置默认**。
 
 ```bash
-cp .env.example .env    # 在 pipeline/ 下；填入 DINGTALK_WEBHOOK 等
-python3 run_pipeline.py --notify-test    # 验证钉钉链路
+cp .env.example .env    # 在 pipeline/ 下；填入 DINGTALK_CLIENT_ID 等企业机器人凭证
+python3 run_pipeline.py --notify-test    # 验证钉钉链路（markdown + 文件）
 ```
 
 | 键 | 用途 | 默认（未配置时） |
 | --- | --- | --- |
-| `DINGTALK_WEBHOOK` | 钉钉机器人地址（含 access_token，**密钥勿外传**） | 空 → 通知整体静默跳过（启动日志提示） |
-| `DINGTALK_KEYWORD` | 机器人关键词过滤 | `gwas` |
-| `DINGTALK_MILESTONES` | `0` 时里程碑只发 P0/P1，OK 级静默 | `1` |
+| `DINGTALK_CLIENT_ID` / `DINGTALK_CLIENT_SECRET` | 企业内部机器人凭证（appKey/appSecret，**密钥勿外传**） | 空 → 通知整体静默跳过（启动日志提示） |
+| `DINGTALK_CONVERSATION_ID` / `DINGTALK_ROBOT_CODE` | 群 openConversationId / 机器人编码（空=复用 CLIENT_ID） | 空 |
+| `DINGTALK_MILESTONES` | `0` 时里程碑只发 P0/P1，OK 级静默（webhook 时代 WEBHOOK/KEYWORD 键已停用） | `1` |
+| `GWAS_ARCHIVE_DIR` | 归档脚本 7z 输出目录 | `$WORK/archive` |
 | `CONTAINER_RT` | 容器运行时（本机 singularity 实为 apptainer 别名） | `singularity` |
 | `GWAS_ENV_FILE` | `.env` 文件本身的位置 | `pipeline/.env` |
 | `GWAS_RAW_DATA` / `GWAS_RESULTS` / `GWAS_DELIVERY_DIR` | 输入/结果/交付目录覆盖 | 基于 `$WORK` 推导 |
@@ -154,6 +155,23 @@ Output/
 
 导出幂等：源 VCF 未更新则不复制（mtime 比较），manifest/md5 每次重新生成。
 
+### 3.1 results/ 归档（archive_results.py，v2.15.0/DEC-25）
+
+批次结果目录随运行累积，`archive_results.py` 把**执行日期超过 30 天**（按目录名
+`<批次>_<YYYYMMDD>` 后缀判定）的批次目录打包为 7z 并删除源目录（离线维护工具，
+不属于流程运行时）：
+
+```bash
+python3 archive_results.py --dry-run   # 只列出将归档的目录，不动任何文件
+python3 archive_results.py             # 归档 results/ 下超 30 天批次目录 → $WORK/archive/
+python3 archive_results.py --days 60   # 自定义保留天数；--results/--out 可改输入输出目录
+```
+
+- 压缩口径（固定）：`7z a -t7z -mx=9 -mfb=192 -ms=on -md=256m -snl -mmt -sdel`
+  ——**`-sdel` 由 7z 保证"压缩成功后才删源"**，失败自动保留；
+- 幂等：输出目录已存在同名 `.7z` → 跳过（不重压不覆盖）；
+- 非批次命名目录（无 `_YYYYMMDD` 后缀）与非法日期一律跳过；需要 `7z` 在 PATH。
+
 ## 4. CLI 参数
 
 | 参数 | 说明 | 默认 |
@@ -202,22 +220,27 @@ auto 档超过 100 线程/900G 照常使用（不设人为上限），只扣系�
 干净页的回收）。规划器对"单样本峰值 > 可用内存"的机器启动即快速失败，防跑一半
 OOM。完整实测记录（复现命令与数据）见 `design_doc/RUN_HISTORY.md`（本仓库）。
 
-## 6. 钉钉通知（分级告警 + 全步骤里程碑）
+## 6. 钉钉通知（企业机器人 · 分级告警 + 全步骤里程碑 + 交付文件推送）
 
-### 6.1 消息结构（依据官方文档实测）
+### 6.1 渠道与消息结构（企业内部机器人，v2.15.0/DEC-24）
 
-机器人消息类型支持 text/link/markdown/actionCard/feedCard，本流程用 **markdown**。
-官方 markdown 子集仅：标题/引用/文字效果/链接/图片/有序无序列表——**不支持表格**，
-换行需 `\n\n`。发送前自动三重规范化（表格降级为列表、单换行提升、超长截断 18KB）。
-**关键词校验实测只作用于正文且大小写敏感**：标题可保持 `[GWAS][P1]` 样式，
-正文缺关键词时自动补一行引用兜底。`--notify off` 关闭；`DINGTALK_MILESTONES=0`
-时只发异常级（P0/P1）里程碑、OK 级静默。发送失败仅降级写日志。
-**webhook 地址来自 `pipeline/.env`（见 §1.2），代码不存密钥**；未配置时通知
-静默跳过并提示配置方法。
+**企业内部应用机器人**（webhook 机器人不能发文件，已弃用）：markdown 群消息走
+v1.0 `robot/groupMessages/send`，文件卡片走 oapi `media/upload` + `sampleFile`；
+accessToken 进程内缓存（7200s，提前 5 分钟过期）。官方 markdown 子集仅：
+标题/引用/文字效果/链接/图片/有序无序列表——**不支持表格**，换行需 `\n\n`，
+发送前自动三重规范化（表格降级为列表、单换行提升、超长截断）。
+`--notify off` 关闭；`DINGTALK_MILESTONES=0` 时只发异常级（P0/P1）里程碑、
+OK 级静默。发送失败仅降级写日志、不影响退出码。
+**凭证四键（CLIENT_ID/CLIENT_SECRET/ROBOT_CODE/CONVERSATION_ID）来自
+`pipeline/.env`（见 §1.2），代码不存密钥**；未配置时通知静默跳过并提示配置方法。
+`--notify-test` 实发一条 markdown + 一个小 zip 文件，验证双链路连通性。
 
 ### 6.2 通知时机
 
-每批次：启动（含开跑前检查）→ Step 0-6 每步里程碑 → 全流程完成；多批次另有总览。模板：
+每批次：启动（含开跑前检查）→ Step 0-6 每步里程碑 → 全流程完成；多批次另有总览。
+**交付文件推送（v2.15.0）：批次全部结束后**（多批次不逐批推，防通知淹没）逐成功
+批次把 `Output/<批次>_<日期>/` 打包临时 zip → 说明消息 + 文件卡片 → 清理临时包；
+zip 超钉钉 20MB 上限时只发说明消息（提示到服务器 Output/ 取）。模板：
 
 ```
 [GWAS][P1] 20260720批次 · Step 2 比对完成
@@ -308,9 +331,10 @@ $WORK/
     ├── runner.py         # singularity 封装、实时输出、超时、返回码、幂等 SKIP
     ├── resource.py       # ★ 资源探测与规划（cgroup/WSL2 识别、workers×线程×内存推导）
     ├── scanner.py        # 三种输入布局扫描（识别器独立函数）+ md5 校验 + Lane 合并 + samples.tsv
-    ├── dingtalk.py       # 钉钉 markdown 通知（urllib 直连 + 三重结构规范化）
+    ├── dingtalk.py       # 钉钉企业机器人（markdown 群消息 + 文件卡片 + 交付 zip 推送）
     ├── alerts.py         # ★ 分级告警（P0/P1 阈值检查）+ 步骤里程碑消息构造
     ├── report.py         # 运行报告 markdown + run_summary.json
+    ├── archive_results.py # results/ 超期批次目录归档 7z（-sdel，DEC-25）
     ├── check_design.py   # DESIGN.md TH 表 ↔ config.py 一致性校验（防漂移）
     ├── tests/            # 回归测试集（run_tests.sh 末尾自动执行 check_design）
     └── modules/          # 每软件一模块：fastqc fastp bwa_mem2 samtools gatk bcftools mosdepth multiqc

@@ -1,40 +1,131 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""钉钉机器人 markdown 通知（urllib.request 直连，不引入 requests）。
+"""钉钉企业内部机器人通知（urllib.request 直连，纯标准库）：markdown + 文件。
 
-依据官方文档《自定义机器人发送消息的消息类型》与《企业内部机器人发送 Markdown 消息》：
-  - 消息类型：text / link / markdown / actionCard / feedCard，本流程用 markdown
-    （title=会话列表预览，text=消息体）
-  - markdown 官方支持子集：标题(#~######)、引用(>)、文字效果(**加粗** 等)、
-    链接、图片、无序列表(-)、有序列表(1.)；**不支持表格**（手机端渲染为竖线串）
-  - 换行需 "\\n\\n"（单个 \\n 不生效）
-  - 发送频率限制 20 条/分钟；发送失败只降级写日志，绝不中断分析流程
+v2.15.0（DEC-24/RUN-39）由自定义 webhook 机器人切换为企业内部应用机器人——
+webhook 机器人不能发文件，交付产物推送需要「媒体上传 + sampleFile 文件卡片」。
 
-本模块在发送前做三层结构规范化：
-  1) 段落规范：单换行 → 双换行（确保客户端真正换行）
-  2) 表格降级：| 表格 | 块自动转为 "- **列名**: 值" 列表（防模板回退成表格）
-  3) 长度保护：超出上限截断并附提示
+配置（.env 三源，DEC-18；客户端实现参考工作区 dingtalk_test/dingtalk_bot.py）：
+  DINGTALK_CLIENT_ID / DINGTALK_CLIENT_SECRET   企业应用凭证（appKey/appSecret）
+  DINGTALK_ROBOT_CODE        机器人编码（通常=Client ID，缺省复用）
+  DINGTALK_CONVERSATION_ID   目标群 openConversationId（形如 cidXXXX==）
+  （DINGTALK_WEBHOOK / DINGTALK_KEYWORD 为 webhook 时代遗留键，已不参与发送）
+
+官方硬限制：
+  - msgParam 为 JSON 字符串且 ≤15000B → 正文截断 MAX_TEXT_BYTES 预留转义余量
+  - 文件消息 ≤20MB 且后缀限 xlsx/pdf/zip/rar/doc/docx → 交付目录打包 zip 即为此
+  - accessToken 有效期 7200s：进程内缓存、提前 5 分钟过期（频繁取 token 会被限流）
+  - markdown 官方子集：不支持表格、单换行不生效 → normalize_markdown 三层规范化
+  - 发送频率 20 条/分钟；发送失败只降级写日志，绝不中断分析流程
 """
 
 import json
+import mimetypes
+import os
 import re
+import shutil
+import tempfile
+import threading
+import time
+import urllib.error
+import urllib.parse
 import urllib.request
+import uuid
 
 import config
 
-# markdown text 有效内容上限（字节，UTF-8）；客户端对超长消息折叠，过长的截断保尾部完整
-MAX_TEXT_BYTES = 18000
+API_BASE = "https://api.dingtalk.com"
+OAPI_BASE = "https://oapi.dingtalk.com"
+
+# markdown text 有效内容上限（字节，UTF-8）：msgParam 限 15000B，预留 JSON 转义
+# （换行/引号转义会膨胀）与 title/键名开销后取 14000
+MAX_TEXT_BYTES = 14000
+
+# 钉钉 type=file 媒体上传的硬限制（清单外格式一律失败，先包成 zip）
+ALLOWED_FILE_EXT = {".xlsx", ".pdf", ".zip", ".rar", ".doc", ".docx"}
+FILE_SIZE_LIMIT = 20 * 1024 * 1024   # 20MB
 
 # webhook 未配置时只告警一次（notify 会被高频调用，避免逐条刷屏）
-_no_webhook_warned = False
+_no_config_warned = False
 
 
-def _no_webhook_err():
-    return (f"未配置 DINGTALK_WEBHOOK（通知已跳过）。配置方法：编辑 "
-            f"{config.ENV_FILE} 写入 DINGTALK_WEBHOOK=…（模板见 .env.example），"
-            "或 export DINGTALK_WEBHOOK 环境变量")
+def _no_config_err():
+    return (f"未配置企业机器人凭证（通知已跳过）。配置方法：编辑 "
+            f"{config.ENV_FILE} 写入 DINGTALK_CLIENT_ID / DINGTALK_CLIENT_SECRET / "
+            "DINGTALK_CONVERSATION_ID（模板见 .env.example），或 export 同名环境变量")
 
 
+def _configured():
+    return bool(config.DINGTALK_CLIENT_ID and config.DINGTALK_CLIENT_SECRET
+                and config.DINGTALK_CONVERSATION_ID)
+
+
+# ── HTTP 底座 ────────────────────────────────────────────────────────────
+def _request(url, method="GET", data=None, headers=None, timeout=60):
+    """→ (status, body_text)；HTTPError 也归一返回（调用方按响应体判成败）"""
+    req = urllib.request.Request(url, data=data, method=method)
+    for k, v in (headers or {}).items():
+        req.add_header(k, v)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status, resp.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode("utf-8", "replace")
+
+
+# ── token（进程内缓存，提前 5 分钟过期）──────────────────────────────────
+_token_lock = threading.Lock()
+_token, _token_exp = "", 0.0
+_oapi_token, _oapi_token_exp = "", 0.0
+
+
+def _reset_token_cache():
+    """测试用：清空进程内 token 缓存"""
+    global _token, _token_exp, _oapi_token, _oapi_token_exp
+    with _token_lock:
+        _token, _token_exp = "", 0.0
+        _oapi_token, _oapi_token_exp = "", 0.0
+
+
+def access_token():
+    """v1.0 accessToken（groupMessages/send 用）"""
+    global _token, _token_exp
+    with _token_lock:
+        if _token and time.time() < _token_exp:
+            return _token
+        status, body = _request(
+            f"{API_BASE}/v1.0/oauth2/accessToken", method="POST",
+            data=json.dumps({"appKey": config.DINGTALK_CLIENT_ID,
+                             "appSecret": config.DINGTALK_CLIENT_SECRET}).encode(),
+            headers={"Content-Type": "application/json"})
+        payload = json.loads(body or "{}")
+        token = payload.get("accessToken")
+        if not token:
+            raise RuntimeError(f"获取 accessToken 失败（HTTP {status}）：{body[:300]}")
+        _token = token
+        _token_exp = time.time() + int(payload.get("expireIn", 7200)) - 300
+        return _token
+
+
+def _oapi_access_token():
+    """旧版 oapi access_token（官方文档明确 media/upload 用 gettoken 的 token）"""
+    global _oapi_token, _oapi_token_exp
+    with _token_lock:
+        if _oapi_token and time.time() < _oapi_token_exp:
+            return _oapi_token
+        qs = urllib.parse.urlencode({"appkey": config.DINGTALK_CLIENT_ID,
+                                     "appsecret": config.DINGTALK_CLIENT_SECRET})
+        status, body = _request(f"{OAPI_BASE}/gettoken?{qs}")
+        payload = json.loads(body or "{}")
+        token = payload.get("access_token")
+        if not token:
+            raise RuntimeError(f"获取 oapi access_token 失败（HTTP {status}）：{body[:300]}")
+        _oapi_token = token
+        _oapi_token_exp = time.time() + int(payload.get("expires_in", 7200)) - 300
+        return _oapi_token
+
+
+# ── markdown 结构规范化（沿用：表格降级 → 段落换行 → 长度保护）─────────
 def md_table_to_list(text):
     """把 markdown 表格块降级为钉钉可渲染的列表块。
     | a | b |\\n| --- | --- |\\n| 1 | 2 |  →  - **a**: 1（b: 2）样式逐行"""
@@ -83,48 +174,166 @@ def normalize_markdown(text):
     return text
 
 
-def send_markdown(title, text, logger=None):
-    """POST markdown 消息。返回 (ok, err)。
-    未配置 DINGTALK_WEBHOOK 时不发网络请求，直接返回 (False, 配置指引)。
-    关键词校验（实测）：作用于正文 text 且大小写敏感——标题可保持 [GWAS][P1]
-    大写模板样式，只需正文含有小写关键词，缺失时自动补一行引用兜底。"""
-    if not config.DINGTALK_WEBHOOK:
-        return False, _no_webhook_err()
-    text = normalize_markdown(text)
-    if config.DINGTALK_KEYWORD and config.DINGTALK_KEYWORD not in text:
-        text += f"\n\n> {config.DINGTALK_KEYWORD}"
-    body = json.dumps({"msgtype": "markdown",
-                       "markdown": {"title": title, "text": text}},
-                      ensure_ascii=False).encode("utf-8")
-    req = urllib.request.Request(
-        config.DINGTALK_WEBHOOK, data=body,
-        headers={"Content-Type": "application/json"})
+# ── 发送 ────────────────────────────────────────────────────────────────
+def _group_send(msg_key, msg_param, logger):
+    """v1.0 群消息统一入口（msgParam 必须是 JSON 字符串，传对象钉钉报
+    invalidParameter）；→ (ok, err)"""
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            resp_data = json.loads(resp.read().decode("utf-8"))
-        ok = resp_data.get("errcode") == 0
-        err = None if ok else str(resp_data)
-        if ok:
+        msg_param_str = json.dumps(msg_param, ensure_ascii=False)
+        if len(msg_param_str.encode()) > 15000:
+            return False, f"msgParam 超过 15000B 限制（{len(msg_param_str.encode())}）"
+        body_obj = {
+            "robotCode": config.DINGTALK_ROBOT_CODE or config.DINGTALK_CLIENT_ID,
+            "openConversationId": config.DINGTALK_CONVERSATION_ID,
+            "msgKey": msg_key,
+            "msgParam": msg_param_str,
+        }
+        status, body = _request(
+            f"{API_BASE}/v1.0/robot/groupMessages/send", method="POST",
+            data=json.dumps(body_obj, ensure_ascii=False).encode(),
+            headers={"Content-Type": "application/json",
+                     "x-acs-dingtalk-access-token": access_token()})
+        payload = json.loads(body or "{}")
+        # 成功返回 processQueryKey；失败返回 code/message
+        if status != 200 or payload.get("code"):
+            err = f"发送失败（HTTP {status}）：{body[:300]}"
             if logger:
-                logger.info(f"钉钉已发送: {title}")   # 成功也留痕（RUN-29 前零记录）
-        elif logger:
-            logger.warn(f"钉钉通知被拒绝: {resp_data}")
-        return ok, err
-    except Exception as e:   # noqa: BLE001  网络/限流等，降级
+                logger.warn(f"钉钉通知被拒绝（不中断流程）: {err}")
+            return False, err
+        return True, None
+    except Exception as e:   # noqa: BLE001  网络/限流/token 失败等，降级
         if logger:
             logger.warn(f"钉钉通知发送失败（不中断流程）: {e}")
         return False, str(e)
 
 
+def send_markdown(title, text, logger=None):
+    """发 markdown 群消息。返回 (ok, err)；未配置凭证时不发网络请求。
+    成功落一行 INFO（RUN-29：实跑 notify=on 需可事后确认钉钉真的发出）。"""
+    if not _configured():
+        return False, _no_config_err()
+    ok, err = _group_send("sampleMarkdown",
+                          {"title": title, "text": normalize_markdown(text)},
+                          logger)
+    if ok and logger:
+        logger.info(f"钉钉已发送: {title}")
+    return ok, err
+
+
 def notify(title, text, logger=None, enabled=True):
-    """流程内通知入口：webhook 未配置时静默跳过（仅首次写一条 WARN 指引配置）。"""
-    global _no_webhook_warned
+    """流程内通知入口：凭证未配置时静默跳过（仅首次写一条 WARN 指引配置）。"""
+    global _no_config_warned
     if not enabled:
         return
-    if not config.DINGTALK_WEBHOOK:
-        if not _no_webhook_warned:
-            _no_webhook_warned = True
+    if not _configured():
+        if not _no_config_warned:
+            _no_config_warned = True
             if logger:
-                logger.warn(f"钉钉通知未启用：{_no_webhook_err()}")
+                logger.warn(f"钉钉通知未启用：{_no_config_err()}")
         return
     send_markdown(title, text, logger=logger)
+
+
+# ── 文件（媒体上传 + sampleFile 卡片）───────────────────────────────────
+def file_reject_reason(path):
+    """发文件前置校验 → None 可发 / str 拒绝原因（体积、格式）"""
+    if not os.path.isfile(path):
+        return f"文件不存在：{path}"
+    size = os.path.getsize(path)
+    if size > FILE_SIZE_LIMIT:
+        return (f"文件 {size / 1048576:.1f}MB 超过钉钉 20MB 上限"
+                "（拆包或改外链下载方案）")
+    ext = os.path.splitext(path)[1].lower()
+    if ext not in ALLOWED_FILE_EXT:
+        return (f"钉钉不支持 {ext or '无后缀'} 格式（支持："
+                f"{', '.join(sorted(ALLOWED_FILE_EXT))}；包成 zip 最省事）")
+    return None
+
+
+def upload_media(path):
+    """上传文件到钉钉媒体库 → mediaId（有效期约 30 天，勿长期复用）。
+    官方要求 media/upload 用 oapi gettoken 的 token，v1.0 token 兜底重试。"""
+    ctype = mimetypes.guess_type(os.path.basename(path))[0] or "application/octet-stream"
+    boundary = "----" + uuid.uuid4().hex
+    with open(path, "rb") as f:
+        content = f.read()
+    body = b"".join([
+        f'--{boundary}\r\nContent-Disposition: form-data; name="type"\r\n\r\nfile\r\n'.encode(),
+        f'--{boundary}\r\nContent-Disposition: form-data; name="media"; '
+        f'filename="{os.path.basename(path)}"\r\nContent-Type: {ctype}\r\n\r\n'.encode(),
+        content,
+        b"\r\n--" + boundary.encode() + b"--\r\n",
+    ])
+
+    def _do(token):
+        return _request(
+            f"{OAPI_BASE}/media/upload?access_token={token}", method="POST",
+            data=body,
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+            timeout=300)
+
+    status, raw = _do(_oapi_access_token())
+    payload = json.loads(raw or "{}")
+    if payload.get("errcode") in (40014, 40001, 42001, 41001):   # token 失效兜底
+        status, raw = _do(access_token())
+        payload = json.loads(raw or "{}")
+    media_id = payload.get("media_id")
+    if not media_id:
+        raise RuntimeError(f"媒体上传失败（HTTP {status}）：{raw[:300]}")
+    return media_id
+
+
+def send_file(path, logger=None):
+    """发原生文件卡片（上传拿 mediaId → sampleFile）。返回 (ok, err)。"""
+    reason = file_reject_reason(path)
+    if reason:
+        if logger:
+            logger.warn(f"钉钉文件发送跳过：{reason}")
+        return False, reason
+    try:
+        media_id = upload_media(path)
+    except Exception as e:   # noqa: BLE001
+        if logger:
+            logger.warn(f"钉钉媒体上传失败（不中断流程）: {e}")
+        return False, str(e)
+    ok, err = _group_send(
+        "sampleFile",
+        {"mediaId": media_id, "fileName": os.path.basename(path),
+         "fileType": os.path.splitext(path)[1].lstrip(".").lower()},
+        logger)
+    if ok and logger:
+        logger.info(f"钉钉文件已发送: {os.path.basename(path)}")
+    return ok, err
+
+
+def send_zip_dir(directory, title, text, logger=None):
+    """目录打包 zip → 先发说明消息再发文件（两条独立消息）→ 清理临时包。
+    交付推送入口（DEC-24）：zip 后缀/20MB 限制由 file_reject_reason 把关，
+    超限只 WARN 跳过文件、说明消息照发；任何失败不中断流程。"""
+    if not _configured():
+        return False, _no_config_err()
+    tmp = tempfile.mkdtemp(prefix="gwas_delivery_")
+    try:
+        base = os.path.join(tmp, os.path.basename(directory.rstrip("/")))
+        zip_path = shutil.make_archive(base, "zip", os.path.dirname(
+            os.path.abspath(directory)), os.path.basename(directory.rstrip("/")))
+        size_mb = os.path.getsize(zip_path) / 1048576
+        reason = file_reject_reason(zip_path)
+        if reason:
+            if logger:
+                logger.warn(f"交付 zip 不发送文件卡片：{reason}")
+            return send_markdown(title, text + f"\n\n> 交付 zip {size_mb:.1f}MB 超限，"
+                               "文件请到服务器 Output/ 目录获取", logger=logger)
+        ok1, err1 = send_markdown(title, text, logger=logger)
+        ok2, err2 = send_file(zip_path, logger=logger)
+        if logger:
+            logger.info(f"交付 zip 推送完成: {os.path.basename(zip_path)}"
+                        f"（{size_mb:.1f}MB，markdown={'OK' if ok1 else err1}"
+                        f"，file={'OK' if ok2 else err2}）")
+        return ok1 and ok2, err1 or err2
+    except Exception as e:   # noqa: BLE001
+        if logger:
+            logger.warn(f"交付 zip 推送失败（不中断流程）: {e}")
+        return False, str(e)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)

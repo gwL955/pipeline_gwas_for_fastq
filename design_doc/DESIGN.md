@@ -3,7 +3,7 @@
 ```yaml
 # ---- design-meta（机器可解析锚点，勿手改格式；版本规则见 §0）----
 doc: GWAS-pipeline-design
-version: 2.14.0
+version: 2.15.0
 updated: 2026-09-18
 owner_human: gewenlong
 owner_machine: ZCode(GLM)
@@ -69,7 +69,7 @@ consistency_check: pipeline/check_design.py      # TH 表 ↔ config.py 防漂�
 | REQ-05 | 批次独立 + 多批次失败隔离；任一批失败退出码非零（退出码语义见 §7.3） | ✅ 完成 | RUN-07/08 |
 | REQ-06 | 输入校验：三种布局自动识别（Illumina 平铺/外送子目录/外送平铺，DEC-23）；R1/R2 不匹配/单端/0字节/命名无效标记跳过；md5sum.txt 并行校验（失败 P0 阻断） | ✅ 完成 | tests/test_scanner.py |
 | REQ-07 | 安全边界：0_raw_data/back 只读；产物仅写 results/ 与 Output/ 交付目录 | ✅ 完成 | 全程无违规写入 |
-| REQ-08 | 钉钉通知：markdown 官方子集、启动/全步骤里程碑/完成/失败、**P0/P1/P2 三级分级（§5.2）**、失败降级不中断 | ✅ 完成 | RUN-16/33；DEC-08/21 |
+| REQ-08 | 钉钉通知：**企业内部机器人（v2.15.0，DEC-24）**、markdown 官方子集、启动/全步骤里程碑/完成/失败、P0/P1/P2 三级分级（§5.2）、失败降级不中断、**交付目录 zip 推送（批次全部结束后统一发送）** | ✅ 完成 | RUN-16/33/39；DEC-08/21/24 |
 | REQ-10 | CLI 参数全集（§7.2）+ `--version` 版本溯源 | ✅ 完成 | run_pipeline.py argparse |
 | REQ-11 | 日志自动落盘（tee 接管 stdio，无需 shell 重定向）+ run_summary.json 结构化（含 pipeline_version） | ✅ 完成 | RUN-16；DEC-09 |
 | REQ-12 | 测试与验收体系（§9）：纯标准库回归集 + TH 防漂移校验 + CI，作为改动/迁移/重建的验收闭环 | ✅ 完成 | RUN-20/30；tests/ |
@@ -77,6 +77,7 @@ consistency_check: pipeline/check_design.py      # TH 表 ↔ config.py 防漂�
 | REQ-14 | 多次运行隔离：results/<批次>_<执行日期>/，同日同目录续跑、跨日新目录；**执行日期在进程启动时取一次（跨 0 点不切换目录）** | ✅ 完成 | RUN-19；DEC-01；跨午夜锚 |
 | REQ-15 | 小测试用例集（纯标准库秒级回归，覆盖历史踩坑），供改动/迁移快速验证 | ✅ 完成 | RUN-20；tests/ |
 | REQ-16 | Step6 on-target 告警阈值 8%（小 panel 正常 8-10%，TH-14） | ✅ 完成 | config.ON_TARGET_P1；笔记 5-5 |
+| REQ-17 | results/ 归档脚本（DEC-25）：执行日期超 30 天的批次目录打包 7z（`-sdel` 成功后删源），幂等、dry-run、失败保留源目录 | ✅ 完成 | archive_results.py；tests/test_archive.py |
 
 > 新增需求：人追加 REQ-17… 行并填目标列，状态列留空由机器回写。
 
@@ -95,9 +96,10 @@ $WORK/
     ├── runner.py         容器命令封装：幂等 SKIP/实时输出/超时 Timer kill/返回码/产物校验/统计超时
     ├── resource.py       ★ 资源探测与规划（cpu=min(os/affinity/cgroup)；mem=min(MemAvailable/cgroup)）
     ├── scanner.py        三种布局扫描（识别器独立函数 LAYOUT_SCANNERS，DEC-23）+ md5（样本名按布局推导）+ Lane 合并 + samples.tsv
-    ├── dingtalk.py       markdown 通知 + 三重规范化（表格降级/\n→\n\n/截断）+ 未配置降级
+    ├── dingtalk.py       企业内部机器人（v2.15.0）：markdown 群消息 + 文件卡片（媒体上传）+ 交付 zip 推送 + 未配置降级
     ├── alerts.py         P0/P1/P2 三级检查 + 里程碑消息构造
     ├── report.py         run_report/run_summary
+    ├── archive_results.py 归档脚本（DEC-25）：results/ 超 30 天批次目录 → 7z（-sdel）
     ├── check_design.py   TH 表 ↔ config.py + 版本双源一致性校验（防漂移）
     ├── tests/            回归用例（踩坑映射见 tests/README.md）
     └── modules/          fastqc fastp bwa_mem2 samtools gatk bcftools mosdepth multiqc
@@ -152,6 +154,8 @@ cohort 级与 MultiQC 串行。样本失败即隔离（记入 failed，退出后
 | DEC-21 | **三级分级体系**：P0=阻断级（严重影响分析→raise 中断批次，退出码 1）；P1=严重（执行失败样本隔离/NTC 污染/mapped<90，报错不中断）；P2=质量提示（阈值越界/口径存疑，只记录）。质量类一律不中断 | 用户决定：P0 应为严重影响分析的阻断级；质量只报错不中断（RUN-33） |
 | DEC-22 | **审计项落地**：P0 Step 间磁盘复查（disk_guard）；P1 reads<1M、PASS 裁决 VCF 空结果；P2 NTC reads 占比/批次深度 CV/recal 观测数（TH-33~36） | RUN-33 审计清单经用户圈选实施（RUN-34） |
 | DEC-23 | **输入布局识别器独立函数化**：每式布局一个 `scan_*` 函数（统一签名 `flat, subdirs → {样本: SampleInfo}`）登记于 `LAYOUT_SCANNERS` 依序应用——先认者优先、同名冲突记无效、不匹配任何布局的文件忽略；新增输入格式只追加函数不改 `scan_batch` 主体。v2.12.0 起三种布局：Illumina 平铺（样本名=去 `_S#_L###_R[12]_001` 尾）、外送子目录（样本名=子目录名）、**外送平铺（样本名=去 `_R[12]` 尾，RUN-36 新增）** | 外送交付常直接平铺于批次目录，此前两种识别器都不认 → 整批"无有效样本"静默跳过且无原因可查（RUN-36 事故）；识别器与 Illumina 式整名锚定互斥（结尾 `_R#.fastq.gz` 与 `_001.fastq.gz` 不可能兼得） |
+| DEC-24 | **钉钉通知企业机器人化 + 交付文件推送（v2.15.0）**：webhook 机器人不能发文件，切换为企业内部应用机器人（v1.0 `groupMessages/send` + oapi `media/upload`，参考实现 dingtalk_test/dingtalk_bot.py）。凭证四键入 .env（CLIENT_ID/SECRET/ROBOT_CODE/CONVERSATION_ID），未配置降级语义不变；**交付推送：批次全部结束后**（多批次不逐批推，防通知淹没）逐成功批次把 `Output/<批次>_<日期>/` 打包临时 zip → 说明消息 + sampleFile 文件卡片 → 清理；zip 硬限制 ≤20MB/后缀白名单（超限只发说明消息提示到服务器取）；`--notify-test` 增加 markdown+文件双链路验证；发送失败只降级 WARN 不影响退出码 | 用户更换企业机器人并要求交付文件推送钉钉（RUN-39）；文件卡片白名单不含 vcf/html → 必须打包 zip |
+| DEC-25 | **results/ 归档脚本（archive_results.py）**：扫描 `<批次>_<YYYYMMDD>` 目录，执行日期距今超 `--days`（默认 30）→ `7z a -t7z -mx=9 -mfb=192 -ms=on -md=256m -snl -mmt -sdel <dest.7z> <src>`（用户指定口径；-sdel=压缩成功后删源，失败自动保留）；输出 `GWAS_ARCHIVE_DIR`（默认 `$WORK/archive/`）；幂等（同名 .7z 已存在跳过）；`--dry-run` 只列不动；非批次命名目录跳过；离线维护工具，不属于流程运行时 | results/ 批次目录无限累积占盘（RUN-39 用户要求）；-sdel 把"删源"安全性交给 7z 自身语义 |
 
 ## 5. 统一口径与阈值总表（TH = config.py 镜像）<!-- HUMAN 可改值；MACHINE 同步 config 后过校验 -->
 
@@ -240,7 +244,9 @@ cohort 级与 MultiQC 串行。样本失败即隔离（记入 failed，退出后
 ### 5.4 通知时机与模板
 
 每批次：启动（样本数/输入体量/资源计划+预检结论）→ Step 0-6 每步里程碑 → 完成/失败；
-多批次另有总览。`DINGTALK_MILESTONES=0` 只发异常级（P0/P1）。里程碑模板：
+多批次另有总览。**交付文件推送（DEC-24，v2.15.0）：批次全部结束后逐成功批次
+`Output/<批次>_<日期>/` 打包 zip → 说明消息 + 文件卡片**（多批次统一发送防淹没；
+zip 超 20MB 只发说明消息）。`DINGTALK_MILESTONES=0` 只发异常级（P0/P1）。里程碑模板：
 
 ```
 [GWAS][P1] 20260720批次 · Step 2 比对完成
@@ -283,11 +289,13 @@ results/260422_20260914/                     Output/260422_20260914/
 
 | 键 | 用途 | 默认（未配置时） |
 | --- | --- | --- |
-| `DINGTALK_WEBHOOK` | 钉钉机器人地址（**密钥，600 权限**） | 空 → 通知静默跳过（启动 WARN） |
-| `DINGTALK_KEYWORD` / `DINGTALK_MILESTONES` | 关键词 / 里程碑开关（0=只发异常级） | `gwas` / `1` |
+| `DINGTALK_CLIENT_ID` / `DINGTALK_CLIENT_SECRET` | 企业内部机器人凭证（appKey/appSecret，**密钥 600 权限**，DEC-24） | 空 → 通知静默跳过（启动 WARN） |
+| `DINGTALK_CONVERSATION_ID` / `DINGTALK_ROBOT_CODE` | 群 openConversationId / 机器人编码（空=复用 CLIENT_ID） | 空 |
+| `DINGTALK_MILESTONES` | 里程碑开关（0=只发异常级）；`DINGTALK_WEBHOOK`/`KEYWORD` 为 webhook 时代遗留键已停用 | `1` |
 | `CONTAINER_RT` | 容器运行时 | `singularity` |
 | `GWAS_ENV_FILE` | .env 文件位置 | `pipeline/.env` |
 | `GWAS_RAW_DATA` / `GWAS_RESULTS` / `GWAS_DELIVERY_DIR` | 输入/结果/交付目录 | `$WORK/0_raw_data`、`$WORK/results`、`$WORK/Output` |
+| `GWAS_ARCHIVE_DIR` | 归档脚本 7z 输出目录（DEC-25） | `$WORK/archive` |
 | `GWAS_REFERENCE_DIR` / `GWAS_SIF_DIR` | 参考文件/镜像目录重定向 | `$WORK/reference`、`$WORK/singularity` |
 | `GWAS_TARGETS_BED` | 靶区 bed 改址（私密文件不入仓库；只指 bed 本体，派生 sorted.bed/interval_list 随其同目录生成，RUN-38） | `$WORK/reference/targets.bed` |
 | `GWAS_DP_MIN` …（TH-15/24/25/33~36 同名键） | 阈值覆盖 | 见 §5.1 |
@@ -337,10 +345,11 @@ results/260422_20260914/                     Output/260422_20260914/
 | test_runner.py | tool 拼装/binds、cpath 映射、rt 绝对路径自包含解析、PATH 兜底、幂等 SKIP、dry-run 不执行、超时 kill、统计命令 timeout=600 传递 |
 | test_resource.py | sort -m 整数 MB、-Xmx 格式、low/high 档精确值、快速失败（mock 探测）、计划表、workers 覆盖 |
 | test_scanner.py | 三种布局、无效输入（R1R2 不匹配/0 字节）、布局互斥与同名冲突、md5（含外送平铺样本名推导）、合并（真实与 dry-run）、samples.tsv 列 |
-| test_dingtalk.py | 表格降级、换行规范化、截断、发送成功落日志（mock urlopen） |
+| test_dingtalk.py | 规范化纯函数（表格降级/换行/截断）；企业机器人链路（mock _request 不发网络）：groupMessages/send 请求结构、msgParam JSON 字符串、token 进程内缓存、未配置零网络+单次 WARN、文件后缀/20MB 校验、media/upload multipart+sampleFile、交付 zip 打包推送（超限跳文件不跳说明） |
 | test_alerts.py | P0/P1/P2 三级判定全集（含 TH-33~36 新检查）、最差级别、里程碑模板 |
 | test_parsers.py | fastqc/fastp(json 真实结构)/markdup/hsmetrics/flagstat/stats/bcftools/mosdepth/recal 观测数 |
 | test_variant_post.py | 矩阵 `./.` 裁决、重建只换 GT、GT 列显式映射、norm outputs 口径 |
+| test_archive.py | 归档脚本：超期目录筛选（名后缀日期/边界>30 天/非法日期跳过）、7z 命令口径锚（8 参数含 -sdel）、幂等跳过、失败保留源、真实 7z 往返（skipUnless 本机有 7z） |
 | test_envfile.py | .env 解析语法、三源优先级、webhook 默认空、防回潮锚（源码无 access_token=）、降级、**靶区 bed 改址锚（GWAS_TARGETS_BED 只指 bed 本体、派生文件随同目录，RUN-38）** |
 | test_misc.py | tee 自动落盘、**实跑静默锚（控制台止于日志路径提示行，处理日志只进 run_<ts>.log，RUN-37）**、目录命名、跨午夜锚、全流程 dry-run success+零落盘锚、**样本名 P0 阻断锚（含中文点名，RUN-38）**、**批次名中文 P0 阻断锚（RUN-38）**、**.gitignore 拦截私密 bed 锚（RUN-38）**、--input 覆盖锚、--version、MultiQC 时序锚（step6 方法）、交付导出（Output 命名/md5sum/MANIFEST/MultiQC extra/幂等）、INDEX 累积锚、disk_guard、外送平铺布局端到端锚（RUN-36） |
 
@@ -349,7 +358,7 @@ CI（.github/workflows/ci.yml）在 py3.10/3.12 矩阵执行。
 
 ### 9.2 迁移/重建验证顺序（DEC-12）
 
-1. `./run_tests.sh` 全绿（全部用例数见 §9.1 各文件，当前共 115）
+1. `./run_tests.sh` 全绿（全部用例数见 §9.1 各文件，当前共 128）
 2. `cp .env.example .env` 填 webhook → `python3 run_pipeline.py --notify-test`（连通性）
 3. `python3 run_pipeline.py --dry-run --batch <小批次>`（容器/参考文件/路径与资源计划）
 4. `python3 run_pipeline.py --resource-profile low --dry-run`（低配档口径）
@@ -357,7 +366,7 @@ CI（.github/workflows/ci.yml）在 py3.10/3.12 矩阵执行。
 
 ### 9.3 重建完成判据
 
-115 用例 + check_design 全绿；`--version` 输出与本文档 version 一致；dry-run 零落盘；
+128 用例 + check_design 全绿；`--version` 输出与本文档 version 一致；dry-run 零落盘；
 单批次实跑 success 且 Step 6 交付目录含 VCF+tbi+MultiQC，`md5sum -c` 全过。
 
 ## 10. 变更日志（CHANGELOG）<!-- 人机共写：每方改动各记一行 -->
@@ -400,6 +409,8 @@ CI（.github/workflows/ci.yml）在 py3.10/3.12 矩阵执行。
 | 2.13.0 | 2026-09-17 | 机 | DEC-09 修订：TeeStream 增 echo 开关（tee_set_echo），main() 在"运行日志: <路径>"提示行后关闭——控制台含启动段（资源计划/参数/批次清单/日志路径），启动错误（外显期）仍可见；dry-run/早退不关；测试 109→111（echo 单元锚 + 实跑静默 E2E 锚）；RUN-37 |
 | 2.14.0 | 2026-09-18 | 人 | 批次名含中文会因 singularity 容器 locale 问题在后续步骤报错 → 批次名/样本名含中文直接 P0；靶区 bed 属私密文件不得推送 GitHub（.gitignore 拦截 + 路径入 .env 可改） |
 | 2.14.0 | 2026-09-18 | 机 | DEC-19 扩到批次名（NAME_RE 白名单共用，P0 消息点名中文/容器不支持）；新增 GWAS_TARGETS_BED 键（默认 $WORK/reference/targets.bed，派生 sorted.bed/interval_list 随 bed 同目录）；.gitignore 拦 *.bed/*.interval_list；.env/.env.example 登记；测试 111→115（批次名中文 P0 E2E/bed 改址/gitignore 锚）；RUN-38 |
+| 2.15.0 | 2026-09-18 | 人 | 钉钉换企业内部机器人（webhook 机器人不能发文件）：批次分析完成后将 Output 交付目录打包 zip 发钉钉（多批次全部分析完再统一发送，防通知淹没）；新增 results/ 归档脚本（超 30 天批次目录按指定 7z 参数打包，-sdel 删源）；参考实现 dingtalk_test/ |
+| 2.15.0 | 2026-09-18 | 机 | DEC-24：dingtalk.py 重写（v1.0 群消息+oapi 媒体上传+token 缓存+文件卡片；凭证四键入 .env；notify/send_markdown 语义与降级不变）；run_pipeline 批次循环后逐 success 批次 send_zip_dir；--notify-test 加文件链路；DEC-25：archive_results.py（--days/--results/--out/--dry-run，幂等）；测试 115→128（企业链路 mock/归档四件套）；RUN-39（--notify-test 实发成功、真实交付 zip 3.8MB→1.7MB 推送成功、归档实测 -sdel 删源+幂等） |
 
 ## 11. 证据索引 <!-- MACHINE -->
 
@@ -408,7 +419,7 @@ CI（.github/workflows/ci.yml）在 py3.10/3.12 矩阵执行。
 | 运行台账（每轮） | pipeline/design_doc/RUN_HISTORY.md |
 | 验收运行（0_raw_data_test） | results/260422_20260914/、results/260422_20260916/ 等（运行日志在各批次 logs/） |
 | 交付 | Output/<批次>_<日期>/ + INDEX.md（累积） |
-| 测试集与 CI | pipeline/tests/（115 用例）+ run_tests.sh + .github/workflows/ci.yml |
+| 测试集与 CI | pipeline/tests/（128 用例）+ run_tests.sh + .github/workflows/ci.yml |
 | 使用说明/与笔记差异 | pipeline/README.md |
 | 环境参数 | pipeline/.env（密钥，600）+ pipeline/.env.example（模板） |
 | 命令参考快照 | pipeline/design_doc/notes_code_reference.md |

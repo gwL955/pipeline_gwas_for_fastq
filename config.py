@@ -9,7 +9,7 @@ from pathlib import Path
 
 # ── 流程版本（与 design_doc/DESIGN.md design-meta version 同步，
 #    check_design.py 校验两处一致；写进 run_summary 与交付 README） ──────
-PIPELINE_VERSION = "2.14.0"
+PIPELINE_VERSION = "2.15.0"
 
 # ── 工作区 ──────────────────────────────────────────────────────────────
 PIPELINE_DIR = Path(__file__).resolve().parent          # $WORK/pipeline
@@ -55,6 +55,8 @@ RESULTS_ROOT = os.environ.get("GWAS_RESULTS", os.path.join(WORK_DIR, "results"))
 # 独立交付目录（v2.3.0 由 delivery/ 改名 Output/）：最终交付文件
 # *.PASS.adjudicated.vcf.gz(+.tbi) + MultiQC 报告 + md5sum.txt + MANIFEST
 DELIVERY_DIR = os.environ.get("GWAS_DELIVERY_DIR", os.path.join(WORK_DIR, "Output"))
+# 归档脚本（archive_results.py）输出目录：超期批次目录 7z 存放处（DEC-25）
+ARCHIVE_DIR = os.environ.get("GWAS_ARCHIVE_DIR", os.path.join(WORK_DIR, "archive"))
 
 # ── 容器运行时 ──────────────────────────────────────────────────────────
 # 当前机器 singularity 实为 apptainer 1.4.5 别名；可切 apptainer
@@ -148,10 +150,17 @@ DEPTH_CV_P2 = float(os.environ.get("GWAS_DEPTH_CV_P2", "0.5"))
 RECAL_OBS_MIN_P2 = float(os.environ.get("GWAS_RECAL_OBS_MIN_P2", "100000"))
                                 # Step4: recal M 事件观测数 <1e5 → P2（known-sites 覆盖崩坏，校准不可信）
 
-# ── 钉钉机器人（地址等环境参数只来自 pipeline/.env 或进程环境变量，禁止硬编码） ──
-DINGTALK_WEBHOOK = os.environ.get("DINGTALK_WEBHOOK", "")   # 未配置 → 通知静默跳过
-DINGTALK_KEYWORD = os.environ.get("DINGTALK_KEYWORD", "gwas")   # 标题需含关键词（区分大小写）
+# ── 钉钉机器人（凭证等环境参数只来自 pipeline/.env 或进程环境变量，禁止硬编码） ──
+# v2.15.0（DEC-24）起为企业内部应用机器人（可发文件）；WEBHOOK/KEYWORD 为
+# webhook 时代遗留键，保留解析但不再参与发送
+DINGTALK_WEBHOOK = os.environ.get("DINGTALK_WEBHOOK", "")   # 遗留（webhook 机器人，已停用）
+DINGTALK_KEYWORD = os.environ.get("DINGTALK_KEYWORD", "gwas")   # 遗留（关键词校验，已停用）
 DINGTALK_MILESTONES = os.environ.get("DINGTALK_MILESTONES", "1") == "1"  # 里程碑通知开关
+DINGTALK_CLIENT_ID = os.environ.get("DINGTALK_CLIENT_ID", "")          # 企业应用 appKey
+DINGTALK_CLIENT_SECRET = os.environ.get("DINGTALK_CLIENT_SECRET", "")  # 企业应用密钥（.env，600）
+DINGTALK_ROBOT_CODE = os.environ.get("DINGTALK_ROBOT_CODE", "")        # 机器人编码（空=复用 CLIENT_ID）
+DINGTALK_CONVERSATION_ID = os.environ.get("DINGTALK_CONVERSATION_ID", "")   # 群 openConversationId
+# 未配置企业凭证 → 通知静默跳过（启动 WARN + 配置指引）
 
 # ── 资源规划常量 ────────────────────────────────────────────────────────
 RESERVE_CORES = 2                          # 系统预留核数
