@@ -32,10 +32,25 @@ class TestChecks(unittest.TestCase):
         self.assertEqual(a[0][0], "P2")
         self.assertIn("保留率", a[0][1])
         a = alerts.check_fastp({"A": 99.0}, {"A": 84.0})
-        self.assertIn(("P2", a[-1][1]), a)          # Q30 <85 → P2（85-95 保留率提示行可能排前）
+        self.assertEqual(a[-1][0], "P2")           # Q30 <85 → P2（保留率提示行可能排前）
+        self.assertIn("Q30", a[-1][1])
         self.assertEqual(alerts.check_fastp({"A": 99.0}, {"A": 95.0}), [])
         levels = [lv for lv, _ in alerts.check_fastp({"A": 90.0}, {"A": 95.0})]
         self.assertEqual(levels, ["OK"])            # 80-95 区间为提示行不升级
+
+    def test_fastp_all_violators_named(self):
+        # 全点名（DEC-30）：多个越界样本逐个一行，不再只报最差一个
+        a = alerts.check_fastp({"A": 75.0, "B": 79.5, "C": 99.0}, {"A": 95.0})
+        self.assertEqual([lv for lv, _ in a], ["P2", "P2"])
+        self.assertIn("A", a[0][1])
+        self.assertIn("B", a[1][1])
+        self.assertNotIn("C", a[0][1] + a[1][1])
+        # 80-95 提示带：OK 级聚合一行点名全部带内样本
+        a = alerts.check_fastp({"A": 92.0, "B": 93.5, "C": 99.0}, {"A": 95.0})
+        self.assertEqual(len(a), 1)
+        self.assertEqual(a[0][0], "OK")
+        self.assertIn("A 92.0%", a[0][1])
+        self.assertIn("B 93.5%", a[0][1])
 
     def test_flagstat(self):
         a = alerts.check_flagstat({"A": 91.0}, {"A": 99.0})
@@ -43,10 +58,20 @@ class TestChecks(unittest.TestCase):
         a = alerts.check_flagstat({"A": 99.0}, {"A": 84.0})
         self.assertEqual(a[0][0], "P2")            # pp <85
         self.assertEqual(alerts.check_flagstat({"A": 99.0}, {"A": 99.0}), [])
+        # 全点名：mapped 与 pp 各自逐越界样本一行
+        a = alerts.check_flagstat({"A": 93.0, "B": 91.0, "C": 99.0},
+                                  {"A": 80.0, "B": 99.0})
+        self.assertEqual(len(a), 3)
+        self.assertIn("mapped", a[0][1])
+        self.assertIn("properly paired", a[2][1])
 
     def test_dup(self):
         self.assertEqual(alerts.check_dup({"A": 31.0})[0][0], "P2")
         self.assertEqual(alerts.check_dup({"A": 5.0}), [])
+        a = alerts.check_dup({"A": 31.0, "B": 45.0, "C": 5.0})
+        self.assertEqual(len(a), 2)
+        self.assertIn("A", a[0][1])
+        self.assertIn("B", a[1][1])
 
     def test_capture(self):
         # 捕获效率口径 v2.19.0/DEC-29：PCT_SELECTED ≥85% 告警（新 panel 实测 89-91%，
@@ -62,6 +87,18 @@ class TestChecks(unittest.TestCase):
         self.assertEqual(alerts.check_capture({"A": 80.0}, {"A": 97.0}, {"A": 85.0}), [])
         # on-target 任意低值（1bp SNP panel 下 ≈0.6%）不触发告警
         self.assertEqual(alerts.check_capture({"A": 80.0}, {"A": 97.0}, {"A": 90.0}), [])
+
+    def test_capture_all_violators_named(self):
+        # RUN-43 复盘锚：三样本 on-target 0.58/0.59/0.59 全部越界只报一个的历史行为
+        # 不再复现——PCT_SELECTED 同场景三样本全点名
+        a = alerts.check_capture(
+            {"TG017": 136.2, "TG018": 194.7, "TG019": 193.1},
+            {"TG017": 99.56, "TG018": 99.63, "TG019": 99.65},
+            {"TG017": 40.0, "TG018": 41.5, "TG019": 89.42})
+        self.assertEqual(len(a), 2)
+        self.assertIn("TG017", a[0][1])
+        self.assertIn("TG018", a[1][1])
+        self.assertNotIn("TG019", a[0][1] + a[1][1])
 
     def test_variantqc(self):
         self.assertEqual(alerts.check_variantqc(1.9, 99.0)[0][0], "P2")

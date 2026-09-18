@@ -9,7 +9,7 @@ from pathlib import Path
 
 # ── 流程版本（与 design_doc/DESIGN.md design-meta version 同步，
 #    check_design.py 校验两处一致；写进 run_summary 与交付 README） ──────
-PIPELINE_VERSION = "2.19.0"
+PIPELINE_VERSION = "2.20.0"
 
 # ── 工作区 ──────────────────────────────────────────────────────────────
 PIPELINE_DIR = Path(__file__).resolve().parent          # $WORK/pipeline

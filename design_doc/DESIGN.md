@@ -3,7 +3,7 @@
 ```yaml
 # ---- design-meta（机器可解析锚点，勿手改格式；版本规则见 §0）----
 doc: GWAS-pipeline-design
-version: 2.19.0
+version: 2.20.0
 updated: 2026-09-18
 owner_human: gewenlong
 owner_machine: ZCode(GLM)
@@ -161,6 +161,7 @@ cohort 级与 MultiQC 串行。样本失败即隔离（记入 failed，退出后
 | DEC-27 | **交付超限分卷发送（v2.17.0）**：整包 zip >20MB 时不再只发说明消息——按文件分组打成多卷（`<批次>_partNNofMM.zip`，卷预算=上限 95%、每卷独立合法 zip），说明消息点名卷数与"全部下载解压到同一目录"合并方法，逐卷发文件卡片；单文件超卷预算点名跳过（消息提示到服务器取）；卷数超 `MAX_VOLUMES`（25，钉钉 20 条/分钟限流防刷屏）回落纯说明消息 | 钉钉文件白名单只认 xlsx/pdf/zip/rar/doc/docx，`.zip.001`/`.z01` 等真分卷后缀上传必被拒——每卷独立 zip 是白名单约束下"分卷压缩发送"的唯一可行实现（收方免 cat 合并）；大批次交付整包超 20MB 时此前只能弃发文件（RUN-41 用户要求） |
 | DEC-28 | **失败路径健壮性 + 靶区派生口径（v2.18.0）**：①process_batch 异常分支改用 `ctx.notify_on`（进 try 前即赋值）——曾读仅在成功汇总段赋值的局部 `notify_on`，step 中途抛异常即 UnboundLocalError：失败通知发不出且裸 traceback 炸穿 main()；②HC `-L` 改用 interval_list（字典口径+DEC-26 唯一合并）不用 sorted.bed——GATK 引擎对 -L 区间 contig 严格校验字典，bed 含字典外 contig 即 USER ERROR（samtools -L/mosdepth --by 实测容忍，bcftools/mosdepth 仍用 bed）；③sorted.bed 生成 awk 增 genome.dict contig 白名单（`$1 in c`，字典外行丢弃、_bed_contigs−_dict_contigs 差集 WARN 点名）；④派生靶区文件新鲜度 `_derived_stale`：源 mtime 更新即重建（重建命令不传 runner outputs——陈旧但非空会被 runner 自身幂等误跳过，幂等判断上收 prep） | RUN-42 实跑事故三层：新 panel bed 含 chr22_KI270879v1_alt → 三样本 HC 全部 exit 2 → except 崩于 notify_on → 无通知+裸 traceback（nohup 控制台止于日志路径行，形同静默死亡）；且 sorted.bed 为手工符号链接非空被幂等跳过，换 bed 后陈旧派生一路带进下游 |
 | DEC-29 | **捕获效率口径重定义（v2.19.0）**：①取消 on-target（ON_TARGET_BASES/PF_UQ_BASES_ALIGNED）告警，降为信息指标（run_summary 照存、报告标注"信息指标"）——新 panel（T4029V1hg38，18,339bp 唯一区间，12,014 区间中 11,548 个为 1bp SNP）下 ON_TARGET_BASES 只计落区间内碱基，一条 150bp read 覆盖 SNP 仅贡献 ~1bp，实测坍缩至 0.58-0.59%——是 panel 几何产物而非捕获质量信号，旧 8% 阈值（DEC-15）对好数据全员误报；②捕获效率告警指标改 PCT_SELECTED_BASES（(ON_BAIT+NEAR_BAIT)/比对碱基，含±250bp 邻域）≥85% → TH-14 改挂 PCT_SELECTED_P1=85.0；③旧文档/注释"PCT_SELECTED(25-28%) 不得误读为捕获效率"废止——那是老 panel（区间长、26-40% 观测）时代的结论 | 同批新 panel 数据双流程交叉验证：本地 CollectHsMetrics 89.42/90.28/90.61% vs 外送 statistic.xls pct_selected_bases 89.59/90.38/90.72%（偏差<0.2pp，外送 reads 口径 Flank capture rate 85.7-87.3% 亦在阈值上方）——PCT_SELECTED 与产业侧"捕获率"直觉同口径；85% 留 ~4.5-5.6pp 裕量，捕获失败（杂交失败/错 panel）塌至 <20% 可有效区分；老 panel 数据（26-40%）不适用本阈值，已切换新 panel |
+| DEC-30 | **告警越界样本全点名（v2.20.0）**：check_fastp/check_flagstat/check_dup/check_capture 由"每指标只点名最差一个样本（_min_item/_max_item）"改为逐越界样本一行、名字序全点名（新辅助 `_violating`，方向参数 below/>）；例外：fastp 保留率 80-95% 提示带为 OK 级聚合一行点名（防提示刷屏）；批级指标（Ti/Tv、call rate、深度 CV）单值无点名问题；check_reads_low 本就逐样本；`_min_item` 保留用于指标播报（Step3 ELS 最小值） | RUN-43 复盘：260918 自测三样本 on-target 0.58/0.59/0.59 全部越界，钉钉只报"TG017 0.58%"一行——"每指标报最差"被代表性误读为"只有一个样本坏"，实为批性口径坍缩；全点名后告警行数上限=批内越界样本数×越界指标数，本仓库批次规模（2-13 样本）可控 |
 
 ## 5. 统一口径与阈值总表（TH = config.py 镜像）<!-- HUMAN 可改值；MACHINE 同步 config 后过校验 -->
 
@@ -424,6 +425,8 @@ CI（.github/workflows/ci.yml）在 py3.10/3.12 矩阵执行。
 | 2.18.0 | 2026-09-18 | 机 | DEC-28 四件套：①except/成功两分支统一用 ctx.notify_on；②HC -L 改 interval_list（bed 留给 bcftools/mosdepth——实测容忍字典外 contig）；③sorted.bed 生成 awk 按 genome.dict contig 白名单过滤（丢弃 contig WARN 点名）；④_derived_stale 派生靶区新鲜度（源 mtime 更新即重建，重建命令不传 runner outputs 防幂等误跳）；REQ-04 登记例外；测试 131→134（awk 字典过滤锚/新鲜度逐级重建锚/HC interval_list 锚/E2E 异常路径无 UnboundLocalError 锚——修复前必红）；RUN-42（部署：sorted.bed 符号链接换字典过滤实文件、interval_list 重建、dry-run 实测 -L interval_list） |
 | 2.19.0 | 2026-09-18 | 人 | 捕获效率口径重定义（REQ-16 修订）：取消 on-target 告警（新 panel 1bp SNP 区间下坍缩至 ~0.6% 的几何产物，仅作信息指标）；捕获效率告警改用 PCT_SELECTED_BASES，阈值 85%（依据：新 panel 本地实测 89.4-90.6%，与外送同批 pct_selected_bases 89.6-90.7% 交叉验证一致） |
 | 2.19.0 | 2026-09-18 | 机 | DEC-29：config.ON_TARGET_P1→PCT_SELECTED_P1(85.0)+版本 2.19.0；alerts.check_capture 三参改 pct_selected（文案"捕获效率 PCT_SELECTED"）；run_pipeline 增存 metrics.pct_selected、里程碑通知"捕获效率(selected)"、check_capture 传参换新指标（on_target_pct 保留为信息指标）；gatk.qc_hsmetrics 增 PCT_SELECTED<85 WARN、日志重排（on-target 标注信息口径）、废止旧"PCT_SELECTED 不得误读为捕获效率"注释；report 指标表加捕获效率列；check_design mirrored 集合同步；测试改写 test_capture（134 全绿）；RUN-43 |
+| 2.20.0 | 2026-09-18 | 人 | 告警点名规则改为"越界样本全点名"：每指标只报最差一个样本的设计在 260918 自测中造成误读（三样本 on-target 全部越界只报 TG017 一行，被读成"只有一个样本坏"），要求全部越界样本逐个点名 |
+| 2.20.0 | 2026-09-18 | 机 | DEC-30：alerts 新增 `_violating(d, threshold, below)`（名字序越界样本列表），check_fastp/check_flagstat/check_dup/check_capture 全部改为逐越界样本一行；fastp 保留率 80-95% 提示带改 OK 级聚合一行点名；`_max_item` 删除（无引用），`_min_item` 保留（Step3 ELS 播报）；模块 docstring 增点名规则段；测试 134→136（fastp 全点名/带内聚合锚、capture RUN-43 复盘锚：三样本 PCT_SELECTED 两越界两行、未越界不点名）；RUN-44 |
 
 ## 11. 证据索引 <!-- MACHINE -->
 
