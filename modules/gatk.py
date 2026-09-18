@@ -3,7 +3,13 @@
 """gatk：MarkDuplicates / BQSR / HaplotypeCaller / CombineGVCFs / GenotypeGVCFs /
 SelectVariants / VariantFiltration / CollectHsMetrics 分函数 + interval_list 准备。
 命令与笔记《3-去重+校准》《4-变异检测》《5-测序质量》逐字对应；
-笔记中写死的 -Xmx2g/-t 8 等资源参数由 resource.py 规划值代入（有意工程化，见 README）。"""
+笔记中写死的 -Xmx2g/-t 8 等资源参数由 resource.py 规划值代入（有意工程化，见 README）。
+
+全部命令固定 -Xrs（DEC-33/RUN-48）：JVM 启动时对 SIGHUP 安装自己的处理器，
+覆盖 nohup 经 fork/exec 继承的忽略位——nohup 后台跑 Java 的经典坑（外部服务器
+实跑 Step 5 四个 HC JVM 同瞬 "Hangup" exit=129）；-Xrs 后 JVM 不装信号处理器，
+继承的 SIG_IGN 得以保留。代价：SIGQUIT/SIGTERM 优雅停机与 kill -3 线程转储
+不可用（排障改用 jcmd Thread.print），流程超时兜底本就 SIGKILL，无影响。"""
 
 import os
 
@@ -69,7 +75,7 @@ def prep_interval_list(runner, logger):
                     "--UNIQUE 去重合并 + --DROP_MISSING_CONTIGS 丢字典外 contig，DEC-26）")
         rc = runner.run(
             runner.tool("gatk",
-                        f"gatk --java-options -Xmx2g BedToIntervalList "
+                        f'gatk --java-options "-Xrs -Xmx2g" BedToIntervalList '
                         f"-I {runner.cpath(config.TARGETS_SORTED_BED)} "
                         f"-O {runner.cpath(config.TARGETS_INTERVAL_LIST)} "
                         f"-SD {runner.cpath(config.GENOME_DICT)} "
@@ -84,7 +90,7 @@ def prep_interval_list(runner, logger):
 def markdup(runner, in_bam, out_bam, metrics, gatk_mem, logger):
     rc = runner.run(
         runner.tool("gatk",
-                    f"gatk --java-options -Xmx{gatk_mem} MarkDuplicates "
+                    f'gatk --java-options "-Xrs -Xmx{gatk_mem}" MarkDuplicates '
                     f"-I {runner.cpath(in_bam)} -O {runner.cpath(out_bam)} "
                     f"-M {runner.cpath(metrics)} --CREATE_INDEX true"),
         logger=logger, outputs=[out_bam, metrics])
@@ -137,7 +143,7 @@ def qc_duplication(metrics, logger):
 def base_recalibrator(runner, markdup_bam, table, gatk_mem, logger):
     rc = runner.run(
         runner.tool("gatk",
-                    f"gatk --java-options -Xmx{gatk_mem} BaseRecalibrator "
+                    f'gatk --java-options "-Xrs -Xmx{gatk_mem}" BaseRecalibrator '
                     f"-R {runner.cpath(config.GENOME_FA)} "
                     f"-I {runner.cpath(markdup_bam)} "
                     f"--known-sites {runner.cpath(config.DBSNP_VCF)} "
@@ -151,7 +157,7 @@ def apply_bqsr(runner, markdup_bam, table, out_bam, gatk_mem, logger):
     """ApplyBQSR 输入是 markdup.bam（不是任何中间产物）"""
     rc = runner.run(
         runner.tool("gatk",
-                    f"gatk --java-options -Xmx{gatk_mem} ApplyBQSR "
+                    f'gatk --java-options "-Xrs -Xmx{gatk_mem}" ApplyBQSR '
                     f"-R {runner.cpath(config.GENOME_FA)} "
                     f"-I {runner.cpath(markdup_bam)} "
                     f"--bqsr-recal-file {runner.cpath(table)} "
@@ -172,7 +178,7 @@ def haplotypecaller(runner, bqsr_bam, out_gvcf, gatk_mem, hmm_threads, logger):
     （二者容忍字典外 contig），且 sorted.bed 生成同样已按字典过滤。"""
     rc = runner.run(
         runner.tool("gatk",
-                    f"gatk --java-options -Xmx{gatk_mem} HaplotypeCaller "
+                    f'gatk --java-options "-Xrs -Xmx{gatk_mem}" HaplotypeCaller '
                     f"-R {runner.cpath(config.GENOME_FA)} "
                     f"-I {runner.cpath(bqsr_bam)} "
                     f"-O {runner.cpath(out_gvcf)} "
@@ -189,7 +195,7 @@ def combine_gvcfs(runner, gvcf_list_host, out_host, cohort_mem, logger):
     """gvcf.list 每次重新生成；小 panel 用 CombineGVCFs，不用 GenomicsDB"""
     rc = runner.run(
         runner.tool("gatk",
-                    f"gatk --java-options -Xmx{cohort_mem} CombineGVCFs "
+                    f'gatk --java-options "-Xrs -Xmx{cohort_mem}" CombineGVCFs '
                     f"-R {runner.cpath(config.GENOME_FA)} "
                     f"-V {runner.cpath(gvcf_list_host)} "
                     f"-O {runner.cpath(out_host)}"),
@@ -200,7 +206,7 @@ def combine_gvcfs(runner, gvcf_list_host, out_host, cohort_mem, logger):
 def genotype_gvcfs(runner, combined_gvcf, out_host, cohort_mem, logger):
     rc = runner.run(
         runner.tool("gatk",
-                    f"gatk --java-options -Xmx{cohort_mem} GenotypeGVCFs "
+                    f'gatk --java-options "-Xrs -Xmx{cohort_mem}" GenotypeGVCFs '
                     f"-R {runner.cpath(config.GENOME_FA)} "
                     f"-V {runner.cpath(combined_gvcf)} "
                     f"-O {runner.cpath(out_host)}"),
@@ -212,7 +218,7 @@ def select_variants(runner, in_vcf, vtype, out_vcf, gatk_mem, logger):
     """SNP / INDEL 分拣（必须先 norm 摊平，防 MIXED 整条丢弃）"""
     rc = runner.run(
         runner.tool("gatk",
-                    f"gatk --java-options -Xmx{gatk_mem} SelectVariants "
+                    f'gatk --java-options "-Xrs -Xmx{gatk_mem}" SelectVariants '
                     f"-V {runner.cpath(in_vcf)} --select-type {vtype} "
                     f"-O {runner.cpath(out_vcf)}"),
         logger=logger, outputs=[out_vcf])
@@ -224,7 +230,7 @@ def variant_filtration(runner, in_vcf, out_vcf, filters, gatk_mem, logger):
     fargs = " ".join(f'-filter "{expr}" --filter-name {name}' for expr, name in filters)
     rc = runner.run(
         runner.tool("gatk",
-                    f"gatk --java-options -Xmx{gatk_mem} VariantFiltration "
+                    f'gatk --java-options "-Xrs -Xmx{gatk_mem}" VariantFiltration '
                     f"-V {runner.cpath(in_vcf)} {fargs} "
                     f"-O {runner.cpath(out_vcf)}"),
         logger=logger, outputs=[out_vcf])
@@ -236,7 +242,7 @@ def collect_hsmetrics(runner, bam, out_txt, gatk_mem, logger):
     """BAIT_INTERVALS = TARGET_INTERVALS = targets.sorted.interval_list（bait 与 target 同一文件）"""
     rc = runner.run(
         runner.tool("gatk",
-                    f"gatk --java-options -Xmx{gatk_mem} CollectHsMetrics "
+                    f'gatk --java-options "-Xrs -Xmx{gatk_mem}" CollectHsMetrics '
                     f"-I {runner.cpath(bam)} "
                     f"-O {runner.cpath(out_txt)} "
                     f"-R {runner.cpath(config.GENOME_FA)} "

@@ -672,5 +672,151 @@ class TestBatchExceptionPath(unittest.TestCase):
             self.assertNotIn("UnboundLocalError", combined)   # 修复锚：不再二次崩
 
 
+class TestSighupHardening(unittest.TestCase):
+    """★ SIGHUP 防护锚（DEC-33/RUN-48）：nohup 只让 Python 忽略 SIGHUP，
+    SIG_IGN 经 fork/exec 继承本可覆盖 sh/singularity/bcftools 等全部子进程，
+    但 JVM 启动时会安装自己的 SIGHUP 处理器覆盖继承位（除非 -Xrs）——
+    外部服务器实跑 Step 5 四个 HC JVM 同瞬 "Hangup"（exit=129=128+SIGHUP）"""
+
+    def test_sighup_ignored_after_guard(self):
+        import signal
+        from run_pipeline import ignore_sighup
+        old = signal.getsignal(signal.SIGHUP)
+        try:
+            ignore_sighup()
+            self.assertIs(signal.getsignal(signal.SIGHUP), signal.SIG_IGN)
+        finally:
+            signal.signal(signal.SIGHUP, old)
+
+    def test_gatk_java_options_carry_xrs(self):
+        """GATK 全部 10 类命令必须带 -Xrs（JVM 不装信号处理器，继承的
+        忽略位得以保留）；旧形态 `--java-options -Xmx`（无 -Xrs）不得残留"""
+        from modules import gatk as mgatk
+        src = open(mgatk.__file__, encoding="utf-8").read()
+        self.assertEqual(src.count('--java-options "-Xrs -Xmx'), 10)
+        self.assertNotIn("--java-options -Xmx", src)
+
+    def test_haplotypecaller_command_shape(self):
+        """代表性命令形态锚：单参数引号包裹多 JVM 选项（GATK 启动器文档口径
+        --java-options 'OPTION1[ OPTION2 ...]'；实测容器内跑通）"""
+        from modules import gatk as mgatk
+        cmds = []
+
+        class R:
+            def run(self, cmd, logger=None, outputs=(), timeout=None, capture=False):
+                cmds.append(cmd)
+                return 0
+
+            def tool(self, sif_key, args, binds=None):
+                return f"singularity:{sif_key} {args}"
+
+            def cpath(self, path):
+                return path
+
+        with mock.patch.object(config, "TARGETS_INTERVAL_LIST", "/x/i.list"):
+            ok = mgatk.haplotypecaller(R(), "/x/a.bam", "/x/a.g.vcf.gz",
+                                       "2g", 2, _FakeLog())
+        self.assertTrue(ok)
+        self.assertIn('--java-options "-Xrs -Xmx2g" HaplotypeCaller', cmds[0])
+
+    def test_fastqc_env_injects_xrs(self):
+        """fastqc 同为 JVM 但启动器不收 --java-options → 命令前缀
+        _JAVA_OPTIONS=-Xrs 注入（singularity 默认透传宿主环境进容器）"""
+        from modules import fastqc as mfastqc
+        cmds = []
+
+        class R:
+            def run(self, cmd, logger=None, outputs=(), timeout=None, capture=False):
+                cmds.append(cmd)
+                return 0
+
+            def tool(self, sif_key, args, binds=None):
+                return f"rt exec {args}"
+
+            def cpath(self, path):
+                return path
+
+        self.assertTrue(mfastqc.run_fastqc(R(), ["/x/a_R1.fastq.gz"],
+                                           "/x/qc", 2, _FakeLog()))
+        self.assertTrue(cmds[0].startswith("_JAVA_OPTIONS=-Xrs rt exec"))
+        self.assertIn("fastqc -t 2", cmds[0])
+
+    def test_step5_split_uses_hcok(self):
+        """★ 拆分名单锚（DEC-34/RUN-48）：每样本 hardfiltered/PASS 拆分必须遍历
+        实际进入 cohort 的 hc_ok——曾遍历 HC 失败前的原始 calling，失败样本不在
+        cohort VCF 头，bcftools view -s 连锁报"样本不存在"（exit=255）"""
+        import inspect
+        from run_pipeline import BatchCtx
+        src = inspect.getsource(BatchCtx.step5_variant_calling)
+        self.assertIn("for sm in hc_ok:", src)
+
+
+class TestCohortRerunGuard(unittest.TestCase):
+    """★ cohort 复跑守卫锚（DEC-34/RUN-48）：同日断点续跑补回 HC 失败样本后
+    gvcf.list 样本集变化，旧 cohort 链产物非空仍被幂等 SKIP 沿用旧口径——
+    补回样本 view -s 静默失败、交付残缺还报 success；守卫按现存 VCF header
+    样本清单（bcftools query -l）比对，不一致即作废 cohort/matrix/
+    per_sample_vcf 全部派生产物重算"""
+
+    class _R:
+        dry_run = False
+
+        def __init__(self, samples_out):
+            self._out = samples_out
+
+        def out(self, cmd, logger=None, timeout=None):
+            return self._out
+
+        def tool(self, sif_key, args, binds=None):
+            return f"rt:{sif_key} {args}"
+
+        def cpath(self, p):
+            return p
+
+    def _mk(self, td):
+        work = os.path.join(td, "results", "B_20990909")
+        for d in ("cohort", "matrix", "per_sample_vcf"):
+            os.makedirs(os.path.join(work, d))
+        paths = [os.path.join(work, "cohort", "cohort.g.vcf.gz"),
+                 os.path.join(work, "cohort", "cohort.PASS.vcf.gz"),
+                 os.path.join(work, "matrix", "genotype_matrix.tsv"),
+                 os.path.join(work, "per_sample_vcf", "S1.PASS.adjudicated.vcf.gz")]
+        for p in paths:
+            open(p, "wb").write(b"x")
+        return work, paths
+
+    def _guard(self, td, samples_out, hc_ok):
+        from run_pipeline import cohort_rerun_guard
+        work, paths = self._mk(td)
+        fired = cohort_rerun_guard(
+            self._R(samples_out), work, hc_ok, _FakeLog(),
+            checks=(("cohort.g.vcf.gz", paths[0]),))
+        return work, paths, fired
+
+    def test_invalidate_on_sample_set_change(self):
+        """旧 cohort 缺 S3（4 样本 HC 被杀后补跑场景）→ 三个派生目录清空重算"""
+        with tempfile.TemporaryDirectory() as td:
+            work, paths, fired = self._guard(td, "S1\nS2\n", ["S1", "S2", "S3"])
+            self.assertTrue(fired)
+            for d in ("cohort", "matrix", "per_sample_vcf"):
+                self.assertEqual(os.listdir(os.path.join(work, d)), [])
+
+    def test_keep_when_same_set(self):
+        """样本集一致（正常同日续跑）→ 零动作，幂等语义不变（REQ-04）"""
+        with tempfile.TemporaryDirectory() as td:
+            _, paths, fired = self._guard(td, "S1\nS2\n", ["S1", "S2"])
+            self.assertFalse(fired)
+            for p in paths:
+                self.assertGreater(os.path.getsize(p), 0)
+
+    def test_keep_when_header_unreadable(self):
+        """header 读不出（dry-run / 容器异常）→ 不判不作废，零副作用"""
+        with tempfile.TemporaryDirectory() as td:
+            _, paths, fired = self._guard(td, "", ["S1", "S2", "S3"])
+            self.assertFalse(fired)
+            for p in paths:
+                self.assertGreater(os.path.getsize(p), 0)
+
+
 if __name__ == "__main__":
     unittest.main()

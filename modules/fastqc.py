@@ -11,13 +11,17 @@ import config
 
 
 def run_fastqc(runner, fastqs_host, outdir_host, threads, logger):
-    """fastqc -t N -o outdir <fastq...>（对原始/合并后与 clean fastq 各跑一次）"""
+    """fastqc -t N -o outdir <fastq...>（对原始/合并后与 clean fastq 各跑一次）。
+    fastqc 同为 JVM 但其启动器不收 --java-options——SIGHUP 防护（DEC-33/RUN-48）
+    经 _JAVA_OPTIONS=-Xrs 环境前缀注入（singularity 默认透传宿主环境进容器；
+    代价：每条命令 stderr 多一行 "Picked up _JAVA_OPTIONS: -Xrs" 提示）"""
     outs = [f"{outdir_host}/{fq.rsplit('/', 1)[-1].replace('.fastq.gz', '')}_fastqc.zip"
             for fq in fastqs_host]
     rc = runner.run(
-        runner.tool("fastqc",
-                    f"fastqc -t {threads} -o {runner.cpath(outdir_host)} "
-                    + " ".join(runner.cpath(f) for f in fastqs_host)),
+        "_JAVA_OPTIONS=-Xrs "
+        + runner.tool("fastqc",
+                      f"fastqc -t {threads} -o {runner.cpath(outdir_host)} "
+                      + " ".join(runner.cpath(f) for f in fastqs_host)),
         logger=logger, outputs=outs)
     return rc == 0
 

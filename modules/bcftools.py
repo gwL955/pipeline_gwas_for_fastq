@@ -130,6 +130,14 @@ def query_lines(runner, vcf, fmt, logger=None):
     return [l for l in out.splitlines() if l]
 
 
+def list_samples(runner, vcf, logger=None):
+    """VCF header 样本清单（bcftools query -l；cohort 复跑守卫用，DEC-34）。
+    失败/dry-run 返回 []（调用方据此跳过判定，零副作用）"""
+    out = runner.out(_bc(runner, f"query -l {runner.cpath(vcf)}"),
+                     logger=logger, timeout=config.STATS_TIMEOUT_S)
+    return [l for l in out.splitlines() if l]
+
+
 # ── stats 解析 ──
 def run_stats(runner, vcf, out_host, logger):
     rc = runner.run(f"{_bc(runner, f'stats {runner.cpath(vcf)}')} > {out_host}",

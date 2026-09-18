@@ -31,6 +31,9 @@ python3 run_pipeline.py --batch 260422
 #    日志全自动落盘（tee 进 results/<批次>_<日期>/logs/run_<时间戳>.log），无需 shell
 #    重定向；实跑控制台在打印日志路径提示行后即静默（v2.13.0），nohup 仅用于后台
 #    防断线，nohup.out 不会再堆积运行日志
+#    v2.23.0 起 nohup 后台全链路免疫终端关闭（DEC-33）：程序启动即忽略 SIGHUP，
+#    GATK 命令带 -Xrs、fastqc 经 _JAVA_OPTIONS 注入——JVM 不再覆盖继承的忽略位
+#    （曾在外部服务器同瞬杀死 4 个 HC JVM，"Hangup" exit=129）
 nohup python3 run_pipeline.py --input 0_raw_data &
 
 # ④ 低配档核对 / 钉钉测试
@@ -39,7 +42,10 @@ python3 run_pipeline.py --notify-test
 ```
 
 中断后**直接重跑同一命令**即可续跑：每个产物（含 .tbi/.metrics/.table）落盘前检查
-存在且非空，已存在即 `[SKIP]`，只补缺失部分。
+存在且非空，已存在即 `[SKIP]`，只补缺失部分。若续跑时联合分型样本集变化
+（如补回 Step 5 失败样本），cohort 复跑守卫（DEC-34）会读现存 cohort VCF 的
+header 样本清单与本次比对，不一致即自动作废旧 cohort/矩阵/每样本 VCF 重算，
+防旧口径产物被幂等 SKIP 沿用、补回样本静默丢失。
 
 ## 1.1 日志说明（自动输出，无需重定向）
 
@@ -336,6 +342,7 @@ Step3 重复率、Step6 深度/20X/捕获效率、完成通知质量行）与 St
 | 10 | 笔记输出至工作区根部（qc/ bam/ gvcf/ …） | 全部收进 `results/<批次>_<执行日期>/` | 批次隔离与安全边界要求 |
 | 11 | 笔记散述 HsMetrics/捕获口径 | 捕获效率告警 = PCT_SELECTED ≥85%，on-target 不告警（信息指标）（v2.19.0/DEC-29） | 老结论"PCT_SELECTED(25-28%) 不误作捕获效率"系老 panel 观测，已废止——新 panel 下与外送 pct_selected_bases 交叉验证一致（<0.2pp 偏差） |
 | 12 | 笔记 BedToIntervalList 无 `--UNIQUE`/`--DROP_MISSING_CONTIGS` | 固定 `--UNIQUE true --DROP_MISSING_CONTIGS true`（DEC-26） | 新 panel bed 含字典外 ALT contig（否则 PicardException 中断）；重叠/相邻探针区间合并为唯一区间，靶区碱基按唯一口径（实测 31310→18339bp） |
+| 13 | 笔记 JVM 无信号参数 | GATK `--java-options "-Xrs -Xmx…"`；fastqc 命令前缀 `_JAVA_OPTIONS=-Xrs`（DEC-33） | JVM 启动时装自己的 SIGHUP 处理器，覆盖 nohup 经 fork/exec 继承的忽略位——关闭终端曾同瞬杀死 4 个 HC JVM（"Hangup" exit=129，RUN-48）；`-Xrs` 后不装、继承位保留。代价：kill -3 线程转储不可用（改 `jcmd Thread.print`） |
 
 其余分析学内容（命令、参数语义、阈值：fastp length_required 36、bwa `-K 100000000 -Y`、
 HC interval-padding 100、硬过滤 QD2/QUAL30/SOR3/FS60/MQ40/MQRankSum/ReadPosRankSum 与

@@ -18,6 +18,7 @@ import glob
 import json
 import time
 import shutil
+import signal
 import zipfile
 import argparse
 import tempfile
@@ -651,6 +652,13 @@ class BatchCtx:
             self.log.info(f"gvcf.list 重新生成: {len(hc_ok)} 个 gVCF（批次内联合，严禁跨批次）")
         combined = os.path.join(coh, "cohort.g.vcf.gz")
         raw_vcf = os.path.join(coh, "cohort.raw.vcf.gz")
+        pass_v = os.path.join(coh, "cohort.PASS.vcf.gz")   # 前置定义：复跑守卫要查
+        # cohort 复跑守卫（DEC-34/RUN-48）：同日断点续跑补回 HC 失败样本后
+        # gvcf.list 样本集已变，但旧 cohort 链产物非空仍会被幂等 SKIP——旧口径
+        # （缺样本）的矩阵/拆分/裁决一路沿用，补回样本静默丢失还报 success
+        cohort_rerun_guard(self.runner, self.work, hc_ok, self.log,
+                           checks=(("cohort.g.vcf.gz", combined),
+                                   ("cohort.PASS.vcf.gz", pass_v)))
         if not mgatk.combine_gvcfs(self.runner, gvcf_list, combined,
                                    self.plan.cohort_mem, self.log):
             raise RuntimeError("CombineGVCFs 失败")
@@ -684,7 +692,6 @@ class BatchCtx:
         snp_f = os.path.join(coh, "cohort.snp.hardfiltered.vcf.gz")
         indel_f = os.path.join(coh, "cohort.indel.hardfiltered.vcf.gz")
         hard_v = os.path.join(coh, "cohort.hardfiltered.vcf.gz")
-        pass_v = os.path.join(coh, "cohort.PASS.vcf.gz")
         if not mgatk.select_variants(self.runner, split_vcf, "SNP", snp_v,
                                      self.plan.gatk_mem, self.log) \
                 or not mgatk.select_variants(self.runner, split_vcf, "INDEL", indel_v,
@@ -721,8 +728,11 @@ class BatchCtx:
             self.work, "qc", "bcftools_stats", "cohort.hardfiltered.stats"))
         self.cohort_stats["PASS"] = mbc.parse_stats(os.path.join(
             self.work, "qc", "bcftools_stats", "cohort.PASS.stats"))
-        # 每样本 hardfiltered / PASS（未裁决版，供追溯）
-        for sm in calling:
+        # 每样本 hardfiltered / PASS（未裁决版，供追溯）——名单必须是实际进入
+        # cohort 的 hc_ok（DEC-34/RUN-48）：曾误用 HC 失败前的原始 calling，
+        # 失败样本不在 cohort VCF 头里，bcftools view -s 连锁报"样本不存在"
+        # （exit=255，无产物白跑 2 条命令）
+        for sm in hc_ok:
             hf_sm = os.path.join(self.work, "per_sample_vcf", f"{sm}.hardfiltered.vcf.gz")
             ps_sm = os.path.join(self.work, "per_sample_vcf", f"{sm}.PASS.vcf.gz")
             mbc.split_sample(self.runner, hard_v, sm, hf_sm, self.slog(sm))
@@ -1182,6 +1192,35 @@ def _step_anoms(ctx, step_prefix):
             for sm, reason in ctx.failed.items() if reason.startswith(step_prefix)]
 
 
+# ── cohort 复跑守卫（DEC-34/RUN-48）─────────────────────────────────────
+def cohort_rerun_guard(runner, work, hc_ok, log, checks=()):
+    """断点续跑时 HC 失败样本补回 → gvcf.list 样本集变化，但旧 cohort 链产物
+    非空会被幂等 SKIP——旧口径（缺样本）的 cohort/矩阵/每样本 VCF 一路沿用：
+    矩阵按旧列数裁决、补回样本 view -s 静默失败，交付残缺还报 success。
+    守卫：读现存关键 VCF 的 header 样本清单（bcftools query -l，秒级）与本次
+    hc_ok（sorted，与 VCF 列序同口径，DEC-05）比对，不一致即作废
+    cohort/matrix/per_sample_vcf 全部派生产物（均可在链上重算，REQ-04）。
+    dry-run / header 不可读 → 不判不作废（零副作用）。返回 True=已作废重算。"""
+    stale = []
+    for tag, vcf in checks:
+        if nonempty(vcf):
+            have = mbc.list_samples(runner, vcf)
+            if have and have != list(hc_ok):
+                stale.append(f"{tag}（{len(have)} 样本 ≠ 本次 {len(hc_ok)}）")
+    if not stale:
+        return False
+    log.warn("cohort 样本集与本次联合分型名单不一致——" + "；".join(stale)
+             + "。旧 cohort/矩阵/每样本 VCF 作废重算（DEC-34：HC 失败样本补回后"
+               "的断点续跑，防旧口径产物被幂等 SKIP 沿用）")
+    for d, pats in ((os.path.join(work, "cohort"), ("*.vcf.gz", "*.vcf.gz.tbi")),
+                    (os.path.join(work, "matrix"), ("*.tsv",)),
+                    (os.path.join(work, "per_sample_vcf"), ("*.vcf.gz", "*.vcf.gz.tbi"))):
+        for pat in pats:
+            for p in glob.glob(os.path.join(d, pat)):
+                os.remove(p)
+    return True
+
+
 def _step_notify(notify_on, batch, step_no, name, log, total_steps=None, **kw):
     """步骤里程碑通知。total_steps=--step（编号步数：Step 0 为清点预备步不计入，
     全流程共 6 步；标题"（共 X 步）"，DEC-32，RUN-47 修正首版 +1 口径）；
@@ -1241,6 +1280,20 @@ def _notify_result(batch, bdata, plan, log):
     dingtalk.notify(title, text, logger=log)
 
 
+def ignore_sighup():
+    """启动即忽略 SIGHUP——代码级 nohup（DEC-33/RUN-48）：关闭启动命令所在的
+    终端/SSH 会话时，内核向会话与前台进程组发 SIGHUP；nohup 只让本进程忽略，
+    而 SIG_IGN 经 fork/exec 继承即可覆盖 sh/singularity/bcftools 等全部子进程，
+    唯独 JVM 启动时会安装自己的 SIGHUP 处理器覆盖继承位（除非 -Xrs）——曾在
+    Step 5 同瞬杀死 4 个 HC JVM（"Hangup"，exit=129）。GATK 命令已全部加 -Xrs
+    （modules/gatk），fastqc 经 _JAVA_OPTIONS 注入；此处兜底主进程——未套
+    nohup 的后台启动同样免疫。控制台输出由 TeeStream 兜底（写失败只落盘）。"""
+    try:
+        signal.signal(signal.SIGHUP, signal.SIG_IGN)
+    except (AttributeError, ValueError, OSError):
+        pass   # 平台无 SIGHUP / 非主线程：保持默认
+
+
 def guard_host_python():
     """当前 Python 位于 singularity 容器内 → 启动即失败（快速失败原则）。
     本机 `python` 是容器别名（~/.bashrc: singularity exec ... mamba.sif python），
@@ -1257,6 +1310,7 @@ def guard_host_python():
 
 def main():
     guard_host_python()
+    ignore_sighup()
     args = parse_args()
 
     if args.notify_test:
