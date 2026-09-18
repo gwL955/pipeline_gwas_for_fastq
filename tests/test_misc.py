@@ -243,9 +243,43 @@ class TestLoggerTee(unittest.TestCase):
                 env=env, capture_output=True, text=True, timeout=90)
             self.assertEqual(r.returncode, 1, r.stdout[-500:])   # 批次 failed
             self.assertIn("开跑前-P0", r.stdout)                  # P0 异常项落日志
-            self.assertIn("样本名含非常规字符", r.stdout)
+            self.assertIn("样本名含中文或非常规字符", r.stdout)   # RUN-38 起消息点名中文
             self.assertIn("bad;name", r.stdout)                   # 指名道姓
             self.assertNotIn("有效样本 1 个", r.stdout)            # 不再剔除继续
+
+    def test_chinese_batch_name_p0(self):
+        """★ 批次名中文 P0 阻断锚（RUN-38）：中文批次名进入容器 bind/命令路径
+        在 singularity 内因 locale 报错——开跑前直接中断（退出码 1、指名批次名）"""
+        import subprocess
+        with tempfile.TemporaryDirectory() as td:
+            bdir = os.path.join(td, "in", "测试批次")
+            os.makedirs(bdir)
+            for r in ("R1", "R2"):
+                with open(os.path.join(
+                        bdir, f"NA12878_S1_L001_{r}_001.fastq.gz"), "wb") as f:
+                    f.write(b"@x\nACGT\n+\nIIII\n")
+            env = {**os.environ, **_dep_env(td),
+                   "GWAS_RESULTS": os.path.join(td, "results")}
+            r = subprocess.run(
+                [sys.executable,
+                 os.path.join(os.path.dirname(os.path.dirname(
+                     os.path.abspath(__file__))), "run_pipeline.py"),
+                 "--dry-run", "--resource-profile", "low", "--notify", "off",
+                 "--input", os.path.join(td, "in")],
+                env=env, capture_output=True, text=True, timeout=90)
+            self.assertEqual(r.returncode, 1, r.stdout[-500:])   # 批次 failed
+            self.assertIn("开跑前-P0", r.stdout)
+            self.assertIn("批次名 测试批次 含中文或非常规字符", r.stdout)   # 指名道姓
+            self.assertNotIn("Step 0 完成", r.stdout)             # 中断于合并之前
+
+    def test_gitignore_blocks_private_bed(self):
+        """★ 靶区 bed 防泄露锚（RUN-38）：panel 靶区设计属私密内容，
+        .gitignore 必须拦截 *.bed 与派生 *.interval_list（改址经 .env GWAS_TARGETS_BED）"""
+        gi = os.path.join(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))), ".gitignore")
+        text = open(gi, encoding="utf-8").read()
+        self.assertIn("*.bed", text)
+        self.assertIn("*.interval_list", text)
 
     def test_relative_input_respects_raw_data_override(self):
         """★ --input 相对路径解析锚（RUN-32 事故）：相对名优先在 RAW_DATA_DIR

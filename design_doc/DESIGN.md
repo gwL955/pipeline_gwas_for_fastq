@@ -3,8 +3,8 @@
 ```yaml
 # ---- design-meta（机器可解析锚点，勿手改格式；版本规则见 §0）----
 doc: GWAS-pipeline-design
-version: 2.13.0
-updated: 2026-09-17
+version: 2.14.0
+updated: 2026-09-18
 owner_human: gewenlong
 owner_machine: ZCode(GLM)
 source_of_truth:
@@ -106,14 +106,16 @@ $WORK/
 数据流：`0_raw_data/<批次>/ → results/<批次>_<日期>/{fastq_merged→fastq_clean→bam→gvcf→cohort→matrix→per_sample_vcf→qc} → Output/<批次>_<日期>/`。
 
 参考文件（`$WORK/reference/`，依赖缺失即 P0 阻断）：`genome/genome.fa(+.fai/.dict)`
-（hg38 + bwa-mem2 索引）、`targets.bed`（运行时生成 sorted.bed/interval_list）、
+（hg38 + bwa-mem2 索引）、`targets.bed`（**私密文件，绝不入仓库**——.gitignore 拦截
+`*.bed`/`*.interval_list`，路径经 `GWAS_TARGETS_BED` 改址，运行时派生
+sorted.bed/interval_list 与 bed 同目录生成）、
 `Homo_sapiens_assembly38.dbsnp138.vcf.gz`、`Mills_and_1000G_gold_standard.indels.hg38.vcf.gz`。
 
 ### 3.1 Step 0-6 流程规格（每步：操作 → 产物〔幂等键〕→ 分级检查）
 
 | Step | 操作（容器工具与关键语义） | 产物〔幂等键〕 | 分级检查 |
 | --- | --- | --- | --- |
-| **0 清点与合并** | 扫描三种布局（Illumina 平铺 `<样本>_S#_L###_R[12]_001.fastq.gz` / 外送子目录 `<样本>/<样本>_R[12].fastq.gz` / 外送平铺 `<样本>_R[12].fastq.gz`，DEC-23 识别器独立函数依序应用、先认者优先）→ `--samples` 白名单过滤 → **样本名白名单 `[A-Za-z0-9_.-]`（DEC-19）** → md5 并行校验 → 磁盘/依赖预检 → 多 Lane `cat` 合并（并行）→ samples.tsv | `fastq_merged/<样本>_R{1,2}.fastq.gz`、`samples.tsv` | P0：样本名非法/依赖缺失/磁盘不足/md5 损坏（统一 raise 中断批次）；P1：合并失败（样本终止）；启动通知含全部预检结论 |
+| **0 清点与合并** | 扫描三种布局（Illumina 平铺 `<样本>_S#_L###_R[12]_001.fastq.gz` / 外送子目录 `<样本>/<样本>_R[12].fastq.gz` / 外送平铺 `<样本>_R[12].fastq.gz`，DEC-23 识别器独立函数依序应用、先认者优先）→ `--samples` 白名单过滤 → **批次名/样本名白名单 `[A-Za-z0-9_.-]` 含中文即 P0（DEC-19）** → md5 并行校验 → 磁盘/依赖预检 → 多 Lane `cat` 合并（并行）→ samples.tsv | `fastq_merged/<样本>_R{1,2}.fastq.gz`、`samples.tsv` | P0：批次名/样本名非法/依赖缺失/磁盘不足/md5 损坏（统一 raise 中断批次）；P1：合并失败（样本终止）；启动通知含全部预检结论 |
 | **1 QC+修剪** | fastqc(raw) → fastp（`-l 36`、adapter 自动检测，线程=fastp_threads）→ fastqc(trim) + **Adapter raw→trim 复检** | `fastq_clean/<样本>_R{1,2}.fastq.gz`〔fastp html/json〕、`qc/fastqc_raw|fastqc_trim|fastp`〔fastqc zip〕 | P1：reads<1M（TH-33）；P2：保留率<80/Q30<85（TH-03/04）、NTC reads 占比>1%（TH-34） |
 | **2 比对** | `bwa-mem2 mem -K 100000000 -Y -R '@RG…SM:样本' | samtools sort -@T -m SORT_MEM`（管道流式）→ `samtools index` → flagstat/stats | `bam/<样本>/<样本>.sort.bam(+.bai)`〔sort.bam+.bai〕、`qc/flagstat|stats`〔对应文件〕 | P1：mapped<90 QC 口径（TH-05，报错不中断）；P2：mapped<95/pp<85（TH-06/07） |
 | **3 去重** | `gatk MarkDuplicates` → markdup.bam + metrics → flagstat/stats（去重前 duplicates 行不采集） | `bam/<样本>/<样本>.markdup.bam`〔markdup.bam+metrics〕 | P2：dup>30%（TH-09） |
@@ -145,7 +147,7 @@ cohort 级与 MultiQC 串行。样本失败即隔离（记入 failed，退出后
 | DEC-16 | 容器运行时在 Runner 初始化时自解析为**绝对路径**（shutil.which→标准目录探测），子进程 PATH 兜底补齐标准系统目录 | PATH 受限环境曾致 `singularity: not found`(127)（RUN-22） |
 | DEC-17 | **流程只在宿主 Python 运行**：启动卫兵检测 `/.singularity.d` 或 `SINGULARITY_*`，容器内立即退出并指引用 /usr/bin/python3；流程纯标准库无需 mamba/conda | 嵌套容器运行全部 127 且 TZ=UTC（RUN-22/23） |
 | DEC-18 | **环境参数统一 .env**：钉钉 webhook（含 access_token）等环境参数只存 `pipeline/.env`（模板 .env.example；`GWAS_ENV_FILE` 可改址），config.py 启动解析并入（setdefault），**三源优先级=进程环境变量 > .env > 内置默认**；webhook 未配置→通知静默跳过（启动 WARN+配置指引） | 密钥硬编码随代码泄露且换环境必改源码（RUN-26）；.env 600 |
-| DEC-19 | **样本名白名单 P0 阻断**：含 `[A-Za-z0-9_.-]` 外字符 → P0 异常项入启动通知后直接中断批次（dry-run 同样触发） | 样本名进入 shell 命令拼接与 @RG 头，非常规字符属注入面（RUN-31→32） |
+| DEC-19 | **批次名/样本名白名单 P0 阻断**：含 `[A-Za-z0-9_.-]` 外字符（含中文）→ P0 异常项入启动通知后直接中断批次（dry-run 同样触发；RUN-38 起扩到批次名，消息点名中文） | 样本名进入 shell 命令拼接与 @RG 头，非常规字符属注入面（RUN-31→32）；批次名进入容器 bind 与命令路径，中文路径在 singularity 容器内因 locale 报错（RUN-38 用户实测） |
 | DEC-20 | **process_batch 步骤方法化**：Step 0-6 拆为 `BatchCtx.step0_scan~step6_summary_delivery` 七方法，编排层仅 ~40 行；跨步骤状态挂 ctx（bdata/merged/excluded/cohort_stats/notify_on/run_date/_t0） | 原单函数 ~700 行难读难测（RUN-31）；MultiQC 时序锚锚定 step6 方法源码 |
 | DEC-21 | **三级分级体系**：P0=阻断级（严重影响分析→raise 中断批次，退出码 1）；P1=严重（执行失败样本隔离/NTC 污染/mapped<90，报错不中断）；P2=质量提示（阈值越界/口径存疑，只记录）。质量类一律不中断 | 用户决定：P0 应为严重影响分析的阻断级；质量只报错不中断（RUN-33） |
 | DEC-22 | **审计项落地**：P0 Step 间磁盘复查（disk_guard）；P1 reads<1M、PASS 裁决 VCF 空结果；P2 NTC reads 占比/批次深度 CV/recal 观测数（TH-33~36） | RUN-33 审计清单经用户圈选实施（RUN-34） |
@@ -203,7 +205,7 @@ cohort 级与 MultiQC 串行。样本失败即隔离（记入 failed，退出后
 | 时机 | 规则 | 级别 |
 | --- | --- | --- |
 | 开跑前 · 依赖文件 | sif / genome(.fai/.dict) / targets / known-sites 缺失或 0 字节 → 中断批次 | P0 |
-| 开跑前 · 样本名 | 含非常规字符（A-Za-z0-9_.- 外，注入面）→ 中断批次（DEC-19） | P0 |
+| 开跑前 · 批次名/样本名 | 含非常规字符（A-Za-z0-9_.- 外，含中文；注入面+容器 locale 报错）→ 中断批次（DEC-19） | P0 |
 | 开跑前 · 磁盘空间 | 剩余 < TH-24（每样本估算 TH-25）→ 中断批次 | P0 |
 | 开跑前 · md5 | 输入校验失败（数据损坏）→ 中断批次 | P0 |
 | Step 1-6 间 · 磁盘复查 | Step 结束时剩余 < TH-24 → 终止批次 | P0 |
@@ -287,6 +289,7 @@ results/260422_20260914/                     Output/260422_20260914/
 | `GWAS_ENV_FILE` | .env 文件位置 | `pipeline/.env` |
 | `GWAS_RAW_DATA` / `GWAS_RESULTS` / `GWAS_DELIVERY_DIR` | 输入/结果/交付目录 | `$WORK/0_raw_data`、`$WORK/results`、`$WORK/Output` |
 | `GWAS_REFERENCE_DIR` / `GWAS_SIF_DIR` | 参考文件/镜像目录重定向 | `$WORK/reference`、`$WORK/singularity` |
+| `GWAS_TARGETS_BED` | 靶区 bed 改址（私密文件不入仓库；只指 bed 本体，派生 sorted.bed/interval_list 随其同目录生成，RUN-38） | `$WORK/reference/targets.bed` |
 | `GWAS_DP_MIN` …（TH-15/24/25/33~36 同名键） | 阈值覆盖 | 见 §5.1 |
 
 ### 7.2 CLI 参数
@@ -338,15 +341,15 @@ results/260422_20260914/                     Output/260422_20260914/
 | test_alerts.py | P0/P1/P2 三级判定全集（含 TH-33~36 新检查）、最差级别、里程碑模板 |
 | test_parsers.py | fastqc/fastp(json 真实结构)/markdup/hsmetrics/flagstat/stats/bcftools/mosdepth/recal 观测数 |
 | test_variant_post.py | 矩阵 `./.` 裁决、重建只换 GT、GT 列显式映射、norm outputs 口径 |
-| test_envfile.py | .env 解析语法、三源优先级、webhook 默认空、防回潮锚（源码无 access_token=）、降级 |
-| test_misc.py | tee 自动落盘、**实跑静默锚（控制台止于日志路径提示行，处理日志只进 run_<ts>.log，RUN-37）**、目录命名、跨午夜锚、全流程 dry-run success+零落盘锚、样本名 P0 阻断锚、--input 覆盖锚、--version、MultiQC 时序锚（step6 方法）、交付导出（Output 命名/md5sum/MANIFEST/MultiQC extra/幂等）、INDEX 累积锚、disk_guard、外送平铺布局端到端锚（RUN-36） |
+| test_envfile.py | .env 解析语法、三源优先级、webhook 默认空、防回潮锚（源码无 access_token=）、降级、**靶区 bed 改址锚（GWAS_TARGETS_BED 只指 bed 本体、派生文件随同目录，RUN-38）** |
+| test_misc.py | tee 自动落盘、**实跑静默锚（控制台止于日志路径提示行，处理日志只进 run_<ts>.log，RUN-37）**、目录命名、跨午夜锚、全流程 dry-run success+零落盘锚、**样本名 P0 阻断锚（含中文点名，RUN-38）**、**批次名中文 P0 阻断锚（RUN-38）**、**.gitignore 拦截私密 bed 锚（RUN-38）**、--input 覆盖锚、--version、MultiQC 时序锚（step6 方法）、交付导出（Output 命名/md5sum/MANIFEST/MultiQC extra/幂等）、INDEX 累积锚、disk_guard、外送平铺布局端到端锚（RUN-36） |
 
 `./run_tests.sh` = unittest 全量 + `check_design.py`（TH↔config + 版本双源）；
 CI（.github/workflows/ci.yml）在 py3.10/3.12 矩阵执行。
 
 ### 9.2 迁移/重建验证顺序（DEC-12）
 
-1. `./run_tests.sh` 全绿（全部用例数见 §9.1 各文件，当前共 111）
+1. `./run_tests.sh` 全绿（全部用例数见 §9.1 各文件，当前共 115）
 2. `cp .env.example .env` 填 webhook → `python3 run_pipeline.py --notify-test`（连通性）
 3. `python3 run_pipeline.py --dry-run --batch <小批次>`（容器/参考文件/路径与资源计划）
 4. `python3 run_pipeline.py --resource-profile low --dry-run`（低配档口径）
@@ -354,7 +357,7 @@ CI（.github/workflows/ci.yml）在 py3.10/3.12 矩阵执行。
 
 ### 9.3 重建完成判据
 
-111 用例 + check_design 全绿；`--version` 输出与本文档 version 一致；dry-run 零落盘；
+115 用例 + check_design 全绿；`--version` 输出与本文档 version 一致；dry-run 零落盘；
 单批次实跑 success 且 Step 6 交付目录含 VCF+tbi+MultiQC，`md5sum -c` 全过。
 
 ## 10. 变更日志（CHANGELOG）<!-- 人机共写：每方改动各记一行 -->
@@ -395,6 +398,8 @@ CI（.github/workflows/ci.yml）在 py3.10/3.12 矩阵执行。
 | 2.12.0 | 2026-09-17 | 机 | DEC-23：scan_illumina_flat/scan_outsourced_subdir/scan_outsourced_flat 三识别器登记 LAYOUT_SCANNERS（先认者优先、同名冲突记无效）；顺带修 verify_md5 平铺外送样本名推导（同 RUN-33 病根）；samples.tsv note 增"外送平铺"标签；测试 103→109（布局/互斥/冲突/md5 推导/E2E 锚）；RUN-36 |
 | 2.13.0 | 2026-09-17 | 人 | 实跑取消控制台外显：nohup 后台运行时运行日志不再倾倒进 nohup.out（原计划重定向到输入目录同级 log/，确认 tee 已落 run_<ts>.log 后简化为只关外显） |
 | 2.13.0 | 2026-09-17 | 机 | DEC-09 修订：TeeStream 增 echo 开关（tee_set_echo），main() 在"运行日志: <路径>"提示行后关闭——控制台含启动段（资源计划/参数/批次清单/日志路径），启动错误（外显期）仍可见；dry-run/早退不关；测试 109→111（echo 单元锚 + 实跑静默 E2E 锚）；RUN-37 |
+| 2.14.0 | 2026-09-18 | 人 | 批次名含中文会因 singularity 容器 locale 问题在后续步骤报错 → 批次名/样本名含中文直接 P0；靶区 bed 属私密文件不得推送 GitHub（.gitignore 拦截 + 路径入 .env 可改） |
+| 2.14.0 | 2026-09-18 | 机 | DEC-19 扩到批次名（NAME_RE 白名单共用，P0 消息点名中文/容器不支持）；新增 GWAS_TARGETS_BED 键（默认 $WORK/reference/targets.bed，派生 sorted.bed/interval_list 随 bed 同目录）；.gitignore 拦 *.bed/*.interval_list；.env/.env.example 登记；测试 111→115（批次名中文 P0 E2E/bed 改址/gitignore 锚）；RUN-38 |
 
 ## 11. 证据索引 <!-- MACHINE -->
 
@@ -403,7 +408,7 @@ CI（.github/workflows/ci.yml）在 py3.10/3.12 矩阵执行。
 | 运行台账（每轮） | pipeline/design_doc/RUN_HISTORY.md |
 | 验收运行（0_raw_data_test） | results/260422_20260914/、results/260422_20260916/ 等（运行日志在各批次 logs/） |
 | 交付 | Output/<批次>_<日期>/ + INDEX.md（累积） |
-| 测试集与 CI | pipeline/tests/（111 用例）+ run_tests.sh + .github/workflows/ci.yml |
+| 测试集与 CI | pipeline/tests/（115 用例）+ run_tests.sh + .github/workflows/ci.yml |
 | 使用说明/与笔记差异 | pipeline/README.md |
 | 环境参数 | pipeline/.env（密钥，600）+ pipeline/.env.example（模板） |
 | 命令参考快照 | pipeline/design_doc/notes_code_reference.md |

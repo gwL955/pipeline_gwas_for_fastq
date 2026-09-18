@@ -9,7 +9,7 @@ from pathlib import Path
 
 # ── 流程版本（与 design_doc/DESIGN.md design-meta version 同步，
 #    check_design.py 校验两处一致；写进 run_summary 与交付 README） ──────
-PIPELINE_VERSION = "2.13.0"
+PIPELINE_VERSION = "2.14.0"
 
 # ── 工作区 ──────────────────────────────────────────────────────────────
 PIPELINE_DIR = Path(__file__).resolve().parent          # $WORK/pipeline
@@ -80,9 +80,13 @@ GENOME_DICT = os.path.join(REF_DIR, "genome", "genome.dict")
 DBSNP_VCF = os.path.join(REF_DIR, "Homo_sapiens_assembly38.dbsnp138.vcf.gz")
 MILLS_VCF = os.path.join(REF_DIR, "Mills_and_1000G_gold_standard.indels.hg38.vcf.gz")
 GNOMAD_VCF = os.path.join(REF_DIR, "af-only-gnomad.hg38.vcf.gz")  # 备用
-TARGETS_BED = os.path.join(REF_DIR, "targets.bed")
-TARGETS_SORTED_BED = os.path.join(REF_DIR, "targets.sorted.bed")
-TARGETS_INTERVAL_LIST = os.path.join(REF_DIR, "targets.sorted.interval_list")
+# 靶区 bed 属私密文件（绝不入仓库，.gitignore 拦截 *.bed/*.interval_list）：
+# GWAS_TARGETS_BED 可经 .env 改址（默认 $WORK/reference/targets.bed），
+# 运行时派生的 sorted.bed / interval_list 与 bed 同目录自动生成
+TARGETS_BED = os.environ.get("GWAS_TARGETS_BED", os.path.join(REF_DIR, "targets.bed"))
+TARGETS_DIR = os.path.dirname(TARGETS_BED)
+TARGETS_SORTED_BED = os.path.join(TARGETS_DIR, "targets.sorted.bed")
+TARGETS_INTERVAL_LIST = os.path.join(TARGETS_DIR, "targets.sorted.interval_list")
 
 # ── 工具参数（除命令行覆盖外，均由 resource.py 规划，禁止写死） ─────────
 FASTP_LENGTH_REQUIRED = 36

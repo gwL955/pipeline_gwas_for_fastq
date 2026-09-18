@@ -78,6 +78,7 @@ python3 run_pipeline.py --notify-test    # 验证钉钉链路
 | `GWAS_ENV_FILE` | `.env` 文件本身的位置 | `pipeline/.env` |
 | `GWAS_RAW_DATA` / `GWAS_RESULTS` / `GWAS_DELIVERY_DIR` | 输入/结果/交付目录覆盖 | 基于 `$WORK` 推导 |
 | `GWAS_REFERENCE_DIR` / `GWAS_SIF_DIR` | 参考文件/容器镜像目录重定向（测试与多工作区部署用） | `$WORK/reference`、`$WORK/singularity` |
+| `GWAS_TARGETS_BED` | 靶区 bed 改址（私密文件绝不入仓库；只指 bed 本体，派生 sorted.bed/interval_list 随其同目录生成） | `$WORK/reference/targets.bed` |
 | `GWAS_DP_MIN` / `GWAS_DISK_MIN_FREE_GB` / `GWAS_DISK_PER_SAMPLE_GB` | 可覆盖阈值（TH-15/24/25） | 20 / 200 / 75 |
 
 语法：`KEY=VALUE`；`#` 整行注释，裸值支持行内 ` #` 注释，引号值原样保留。
@@ -99,7 +100,8 @@ python3 run_pipeline.py --notify-test    # 验证钉钉链路
 - **只读**：`0_raw_data/`、`back/` 一律只读；一切分析产物写入 `results/<批次>_<执行日期>/`；
   交付文件仅由导出步骤写入 `Output/<批次>_<执行日期>/`（v2.3.0 前为 `delivery/`）
 - 输入校验：R1/R2 文件数不一致、单端、0 字节、命名不匹配 → 该样本标记无效并跳过；
-  **样本名含非常规字符（DEC-19）→ P0 级错误直接中断该批次分析**（注入面；多批次运行其余批次照常）
+  **批次名/样本名含中文或非常规字符（DEC-19）→ P0 级错误直接中断该批次分析**
+  （注入面 + 中文路径在 singularity 容器内因 locale 报错；多批次运行其余批次照常）
   （列入日志/通知/报告，不影响其余样本）；批次内无有效样本 → 跳过该批次并告警（退出码 0）
 - NTC 等对照样本：纳入 QC，默认排除出联合变异检测（`--exclude-samples` 可改）
 - 多批次失败隔离：某批失败只记录该批状态并通知，不阻断其余批次；
@@ -235,7 +237,7 @@ OOM。完整实测记录（复现命令与数据）见 `design_doc/RUN_HISTORY.m
 | 时机 | 规则 | 级别 |
 | --- | --- | --- |
 | 开跑前 · 依赖文件 | sif / genome(.fai/.dict) / targets / known-sites 缺失或 0 字节 → 中断批次 | P0 |
-| 开跑前 · 样本名 | 含非常规字符（A-Za-z0-9_.- 外，注入面）→ 中断批次（DEC-19） | P0 |
+| 开跑前 · 批次名/样本名 | 含非常规字符（A-Za-z0-9_.- 外，含中文；注入面+容器 locale 报错）→ 中断批次（DEC-19） | P0 |
 | 开跑前 · 磁盘空间 | 剩余 < 200GB（每样本估算约需 75G）→ 中断批次 | P0 |
 | 开跑前 · md5 | 输入校验失败（数据损坏）→ 中断批次（v2.9.0 前仅剔除该样本） | P0 |
 | Step 0 · 合并失败 | cat 非 0（样本终止，其余照常） | P1 |

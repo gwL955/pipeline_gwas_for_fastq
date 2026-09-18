@@ -119,6 +119,47 @@ class TestEnvPrecedence(unittest.TestCase):
             importlib.reload(config)   # 恢复真实配置，避免污染其余用例
 
 
+class TestTargetsBedEnvOverride(unittest.TestCase):
+    """★ 靶区 bed 改址锚（RUN-38）：GWAS_TARGETS_BED 只指 bed 本体，
+    派生 sorted.bed/interval_list 随其同目录；未配置走内置默认 $WORK/reference/targets.bed"""
+
+    def test_default_without_key(self):
+        p = _write_env("DINGTALK_KEYWORD=unittest\n")   # 不含 GWAS_TARGETS_BED
+        env = {k: v for k, v in os.environ.items()
+               if not k.startswith(("GWAS_", "DINGTALK_"))}
+        env["GWAS_ENV_FILE"] = p
+        try:
+            with mock.patch.dict(os.environ, env, clear=True):
+                importlib.reload(config)
+                self.assertEqual(config.TARGETS_BED,
+                                 os.path.join(config.REF_DIR, "targets.bed"))
+                self.assertEqual(config.TARGETS_SORTED_BED,
+                                 os.path.join(config.REF_DIR, "targets.sorted.bed"))
+        finally:
+            os.unlink(p)
+            importlib.reload(config)   # 恢复真实配置，避免污染其余用例
+
+    def test_env_file_overrides_bed_location(self):
+        p = _write_env("GWAS_TARGETS_BED=/private/panel/targets.bed\n")
+        env = {k: v for k, v in os.environ.items()
+               if not k.startswith(("GWAS_", "DINGTALK_"))}
+        env["GWAS_ENV_FILE"] = p
+        try:
+            with mock.patch.dict(os.environ, env, clear=True):
+                importlib.reload(config)
+                self.assertEqual(config.TARGETS_BED, "/private/panel/targets.bed")
+                # 派生文件与 bed 同目录（只指定 bed 本体即可）
+                self.assertEqual(config.TARGETS_SORTED_BED,
+                                 "/private/panel/targets.sorted.bed")
+                self.assertEqual(config.TARGETS_INTERVAL_LIST,
+                                 "/private/panel/targets.sorted.interval_list")
+                # 参考文件目录不受影响（genome/dbsnp 等仍在 REF_DIR）
+                self.assertTrue(config.GENOME_FA.startswith(config.REF_DIR))
+        finally:
+            os.unlink(p)
+            importlib.reload(config)
+
+
 class TestNoHardcodedEnvParams(unittest.TestCase):
     """防回潮锚：环境参数（密钥类）不得再硬编码进源码"""
 

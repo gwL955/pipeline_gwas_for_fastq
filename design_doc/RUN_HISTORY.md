@@ -5,8 +5,8 @@
 
 ## 一、总览 <!-- MACHINE -->
 
-- 累计 37 轮（RUN-01~37），其中失败调试轮 7（R01/R02/R03/R04/R06/R11/R12/R22 前半段中计为 7 个失败轮次）、
-  成功验收轮含最终交付链 R05→R08→R15→R19→R20，变更回归轮 R21（v2.0.0）、R22/23（v2.0.1/2）、R24（v2.1.0）、R25（v2.1.1）、R26（v2.2.0）、R27（v2.3.0）、R28（v2.4.0 文档清理）、R29（v2.5.0 日志分析修复）、R30（v2.6.0 仓库工程化）、R31（v2.7.0 五项修改）、R32（v2.8.0 样本名 P0 阻断）、R33（v2.9.0 分级体系三级化）、R34（v2.10.0 审计项落地）、R35（v2.11.0 设计文档自含化）、R36（v2.12.0 外送平铺布局）、R37（v2.13.0 实跑静默）。
+- 累计 38 轮（RUN-01~38），其中失败调试轮 7（R01/R02/R03/R04/R06/R11/R12/R22 前半段中计为 7 个失败轮次）、
+  成功验收轮含最终交付链 R05→R08→R15→R19→R20，变更回归轮 R21（v2.0.0）、R22/23（v2.0.1/2）、R24（v2.1.0）、R25（v2.1.1）、R26（v2.2.0）、R27（v2.3.0）、R28（v2.4.0 文档清理）、R29（v2.5.0 日志分析修复）、R30（v2.6.0 仓库工程化）、R31（v2.7.0 五项修改）、R32（v2.8.0 样本名 P0 阻断）、R33（v2.9.0 分级体系三级化）、R34（v2.10.0 审计项落地）、R35（v2.11.0 设计文档自含化）、R36（v2.12.0 外送平铺布局）、R37（v2.13.0 实跑静默）、R38（v2.14.0 批次名中文 P0 + 靶区 bed 私密化）。
 - 关键修复链：binds 遮蔽 → sort -m 格式 → norm 索引 → GT 列序互换 → cgroup 资源边界 →
   对账口径 → 2 个测试集抓出的潜伏 bug。
 
@@ -51,6 +51,7 @@
 | RUN-35 | 09-16 15:3x | 用户要求：当前实际/修改情况/关键点合并入设计文档；废弃目标删除；目标=可据文档从头重建项目 | ✅ | DESIGN.md 整体重写为自含重建规格（2.11.0）：新增 §3.1 Step 0-6 流程规格表（操作/容器语义/幂等键/分级检查）、§5.2 分级告警体系全表（P0×5/P1×7/P2×9）、§5.3 资源推导、§5.4 通知时机、§6 目录树、§7 配置与接口（.env 键表+三源优先级/CLI 全参/退出码语义）、§9 测试与验收（用例构成/迁移顺序/9.3 重建完成判据）；REQ-08/12 更新现口径；DEC 表按编号重排（22 项全保留）；TH×32/REQ×16/DEC 编号锚全部稳定；历史沿革收敛于 §10 CHANGELOG；config.PIPELINE_VERSION 同步 2.11.0（check_design 双源校验通过） | design_doc/DESIGN.md v2.11.0 |
 | RUN-36 | 09-17 11:2x→12:3x | 用户报 `--input 0_raw_data_test/`（260917 批）报"无任何有效样本"跳过 → 排查确认：外送交付数据直接平铺于批次目录（`<长前缀样本名>_R1.fastq.gz`），两种识别器都不认（外送式要求子目录、Illumina 式要求 `_S#_L###_` 命名），未识别文件静默忽略故无原因可查。用户指示：新增该布局识别（识别部分独立函数化）、补测试、同步文档、推 GitHub | ✅ | DEC-23：布局识别器独立函数化——scan_illumina_flat/scan_outsourced_subdir/scan_outsourced_flat 统一签名登记 LAYOUT_SCANNERS，scan_batch 只做编排（先认者优先、同名冲突记无效、其余校验逻辑不变）；新识别器 FLAT_OUTSOURCED_RE 整名锚定与 Illumina 式互斥（结尾 `_R#.fastq.gz` vs `_001.fastq.gz` 不可能兼得）；顺带修 verify_md5 平铺外送样本名推导（原 fallback 取整个文件名，md5_failed 与 valid 无交集，同 RUN-33 病根）；samples.tsv note 增"外送平铺"标签。验证：109 tests+check_design 全绿；真实 260917 dry-run 全流程 success（3 样本/0.87GB）；`--step 0` 实跑 success（合并产物字节对齐源文件）；--notify off 全程无计划外钉钉通知 | design_doc/DESIGN.md DEC-23/CHANGELOG 2.12.0；tests/test_scanner.py、test_misc.py |
 | RUN-37 | 09-17 12:4x | 用户要求修改日志输出：`nohup … &` 运行时外显全量日志倾倒进 nohup.out。原方案（落输入目录同级 log/、以运行日期+开始时间命名）在实现中途取消——用户确认 tee 已把全量日志落 `results/<批次>_<日期>/logs/run_<ts>.log`，直接关闭外显即可 | ✅ | DEC-09 修订：TeeStream 增 echo 开关（tee_set_echo，只控回显、文件镜像不受影响）；main() 在"运行日志: <路径>"提示行后 tee_set_echo(False)——控制台保留启动段（资源计划/参数/批次清单/日志路径指针，便于 tail -f），启动错误（输入目录不存在等）发生在外显期仍直接可见；dry-run/无批次早退不关（控制台全程可见+零落盘）。验证：111 tests+check_design 全绿；真实 260917 `--step 0`（幂等）控制台止于日志路径行、run_<ts>.log 含全量（含 success 结束行）；dry-run 控制台照常全量输出 | design_doc/DESIGN.md DEC-09/CHANGELOG 2.13.0；tests/test_misc.py |
+| RUN-38 | 09-18 12:4x | 用户报两项：①批次名含中文时后续 singularity 步骤因容器环境（locale）报错 → 要求批次名/样本名含中文直接 P0；②target.bed 属私密文件不得推送 GitHub → .gitignore 拦截 + 路径经 .env 指定（默认 $WORK/reference/，只指 bed 本体、派生索引随同目录） | ✅ | ①DEC-19 扩到批次名：模块级 NAME_RE（[A-Za-z0-9_.-]+）白名单共用，step0 预检对 self.batch 校验，P0 消息点名中文与容器 locale 原因（样本名原白名单已天然拒中文，消息同样点名）；②新增 GWAS_TARGETS_BED 键（进程环境 >.env>默认 reference/targets.bed；TARGETS_DIR=dirname(bed)，sorted.bed/interval_list 派生路径随 bed 同目录）；.gitignore 增 *.bed/*.interval_list（私密生信文件区）；.env 登记当前路径（600）、.env.example 注释模板。验证：115 tests+check_design 全绿；E2E 中文批次名 dry-run 退出码 1 指名"测试批次"；git check-ignore 实证两类后缀被拦；真实 260917 dry-run 无回归（TARGETS_BED 经 .env 解析正确） | design_doc/DESIGN.md DEC-19/CHANGELOG 2.14.0；config.py、.gitignore、tests/test_envfile.py、test_misc.py |
 
 ## 三、指标速查（最终有效轮：RUN-08/15 数据）<!-- MACHINE -->
 

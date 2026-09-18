@@ -42,6 +42,11 @@ from modules import bcftools as mbc
 from modules import mosdepth as mmos
 from modules import multiqc as mmultiqc
 
+# 名称白名单（批次名/样本名共用，DEC-19/RUN-38）：两者进入 shell 命令拼接与
+# 结果路径（样本名另进 bwa @RG 头），非常规字符属注入面；中文路径在 singularity
+# 容器内因 locale 报错——含中文即 P0 阻断
+NAME_RE = re.compile(r"[A-Za-z0-9_.\-]+")
+
 
 def parse_args():
     p = argparse.ArgumentParser(
@@ -224,11 +229,17 @@ class BatchCtx:
         if missing_deps:
             pre_anoms.append(("P0", "依赖文件缺失或 0 字节: "
                               + ", ".join(os.path.basename(p) for p in missing_deps)))
-        # 样本名白名单（DEC-19，v2.8.0 起 P0 阻断）：样本名进入 shell 命令拼接
-        # 与 bwa @RG 头，非常规字符属注入面——直接中断分析，不剔除继续
-        bad_names = [sm for sm in valid if not re.fullmatch(r"[A-Za-z0-9_.\-]+", sm)]
+        # 批次名/样本名白名单（DEC-19，v2.8.0 起 P0 阻断；RUN-38 补批次名）：
+        # 两者都进入 shell 命令拼接与结果路径，样本名另进 bwa @RG 头——非常规
+        # 字符属注入面；中文路径在 singularity 容器内因 locale 直接报错（用户实测）
+        bad_batch = None if NAME_RE.fullmatch(self.batch) else self.batch
+        bad_names = [sm for sm in valid if not NAME_RE.fullmatch(sm)]
+        if bad_batch:
+            pre_anoms.append(("P0", f"批次名 {bad_batch} 含中文或非常规字符"
+                              f"（须 A-Za-z0-9_.-，容器环境不支持中文路径）"))
         if bad_names:
-            pre_anoms.append(("P0", "样本名含非常规字符（须 A-Za-z0-9_.-）: "
+            pre_anoms.append(("P0", "样本名含中文或非常规字符"
+                              "（须 A-Za-z0-9_.-，容器环境不支持中文路径）: "
                               + ", ".join(sorted(bad_names))))
         for lv, msg in pre_anoms:
             (self.log.error if lv == "P0" else self.log.warn)(f"[开跑前-{lv}] {msg}")
@@ -264,8 +275,10 @@ class BatchCtx:
         p0_reasons = []
         if missing_deps:
             p0_reasons.append(f"依赖文件缺失 → {'; '.join(missing_deps)}")
+        if bad_batch:
+            p0_reasons.append(f"批次名含中文或非常规字符（容器不支持）→ {bad_batch}")
         if bad_names:
-            p0_reasons.append(f"样本名非常规字符（注入面）→ {'; '.join(sorted(bad_names))}")
+            p0_reasons.append(f"样本名中文或非常规字符（注入面/容器不支持）→ {'; '.join(sorted(bad_names))}")
         if free_gb < config.DISK_MIN_FREE_GB:
             p0_reasons.append(f"磁盘剩余 {free_gb:.0f}GB < {config.DISK_MIN_FREE_GB}GB"
                               f"（{n_initial} 样本估算约需 {need_gb}GB）")
