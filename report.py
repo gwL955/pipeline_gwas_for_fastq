@@ -32,7 +32,8 @@ def render_run_report(batch, bdata, out_path):
                        ("mapped_pct", "mapped %"), ("dup_pct", "dup %"),
                        ("mean_target_coverage", "MEAN 靶深度 ×"),
                        ("pct_20x", "20X 覆盖 %"),
-                       ("on_target_pct", "on-target %"),
+                       ("pct_selected", "捕获效率 %（PCT_SELECTED）"),
+                       ("on_target_pct", "on-target %（信息指标）"),
                        ("snp_raw", "raw SNP"), ("indel_raw", "raw INDEL"),
                        ("snp_pass", "PASS SNP"), ("indel_pass", "PASS INDEL"),
                        ("titv_raw", "Ti/Tv raw"), ("titv_pass", "Ti/Tv PASS")):

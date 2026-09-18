@@ -9,7 +9,7 @@ from pathlib import Path
 
 # ── 流程版本（与 design_doc/DESIGN.md design-meta version 同步，
 #    check_design.py 校验两处一致；写进 run_summary 与交付 README） ──────
-PIPELINE_VERSION = "2.18.0"
+PIPELINE_VERSION = "2.19.0"
 
 # ── 工作区 ──────────────────────────────────────────────────────────────
 PIPELINE_DIR = Path(__file__).resolve().parent          # $WORK/pipeline
@@ -135,7 +135,9 @@ FASTP_Q30_P1 = 85.0             # Step1: Q30 <85% → P2
 MAPPED_NOTIFY_P1 = 95.0         # Step2: mapped <95% → P2（严于 QC 口径 90→P1）
 PROPER_PAIR_P1 = 85.0           # Step2: properly paired <85% → P2
 DUP_P1 = 30.0                   # Step3: 重复率 >30% → P2
-ON_TARGET_P1 = 8.0              # Step6: on-target <8% → P2（小 panel 正常 ≈8-10%，见笔记 5-5）
+PCT_SELECTED_P1 = 85.0          # Step6: 捕获效率 PCT_SELECTED_BASES <85% → P2（v2.19.0/DEC-29：
+                                # 新 panel 本地实测 89.4-90.6%，外送同批 pct_selected_bases
+                                # 89.6-90.7% 交叉验证一致；老 panel 26-40% 不适用本阈值）
 MEAN_DEPTH_P1 = 50.0            # Step6: mean depth <50× → P2
 PCT_20X_P1 = 95.0               # Step6: ≥20x 靶比例 <95% → P2
 TITV_P1 = 2.0                   # Step6: Ti/Tv <2.0 → P2（结论口径）

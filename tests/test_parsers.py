@@ -130,6 +130,7 @@ class TestGatkParsers(unittest.TestCase):
         os.unlink(p)
         self.assertEqual(d["MEAN_TARGET_COVERAGE"], 93.519497)
         self.assertEqual(d["PCT_TARGET_BASES_20X"], 0.953103)
+        self.assertEqual(d["PCT_SELECTED_BASES"], 0.395441)   # 捕获效率口径（DEC-29）
         self.assertEqual(d["ON_BAIT_PCT"], 25.0)    # 1000/4000×100
         self.assertEqual(d["ON_TARGET_PCT"], 15.0)
 

@@ -88,7 +88,9 @@ def check_dup(dup_pct):
     return []
 
 
-def check_capture(mean_depth, pct20x, on_target):
+def check_capture(mean_depth, pct20x, pct_selected):
+    """捕获效率口径 v2.19.0/DEC-29：PCT_SELECTED_BASES（on+near bait 占比对碱基比）
+    为告警指标；on-target 不再告警（1bp SNP panel 下为几何产物，见 run_summary 信息指标）"""
     out = []
     sm, v = _min_item(mean_depth)
     if v is not None and v < config.MEAN_DEPTH_P1:
@@ -96,9 +98,9 @@ def check_capture(mean_depth, pct20x, on_target):
     sm, v = _min_item(pct20x)
     if v is not None and v < config.PCT_20X_P1:
         out.append(("P2", f"{sm} ≥20x 靶比例 {v}%（阈值 {config.PCT_20X_P1}%）"))
-    sm, v = _min_item(on_target)
-    if v is not None and v < config.ON_TARGET_P1:
-        out.append(("P2", f"{sm} on-target {v}%（阈值 {config.ON_TARGET_P1}%）"))
+    sm, v = _min_item(pct_selected)
+    if v is not None and v < config.PCT_SELECTED_P1:
+        out.append(("P2", f"{sm} 捕获效率 PCT_SELECTED {v}%（阈值 {config.PCT_SELECTED_P1}%）"))
     return out
 
 

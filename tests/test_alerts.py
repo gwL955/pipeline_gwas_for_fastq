@@ -49,17 +49,19 @@ class TestChecks(unittest.TestCase):
         self.assertEqual(alerts.check_dup({"A": 5.0}), [])
 
     def test_capture(self):
-        # on-target 阈值 8%（小 panel 正常 8-10%，60% 为误用 off-bait 口径的历史值）
-        a = alerts.check_capture({"A": 45.0}, {"A": 96.0}, {"A": 9.0})
+        # 捕获效率口径 v2.19.0/DEC-29：PCT_SELECTED ≥85% 告警（新 panel 实测 89-91%，
+        # 外送 pct_selected_bases 交叉验证）；on-target 已降为信息指标不再告警
+        a = alerts.check_capture({"A": 45.0}, {"A": 96.0}, {"A": 90.0})
         self.assertEqual(a[0][0], "P2")
         self.assertIn("mean depth", a[0][1])
-        a = alerts.check_capture({"A": 60.0}, {"A": 94.0}, {"A": 9.0})
+        a = alerts.check_capture({"A": 60.0}, {"A": 94.0}, {"A": 90.0})
         self.assertEqual(a[0][0], "P2")            # 20x <95
-        a = alerts.check_capture({"A": 60.0}, {"A": 96.0}, {"A": 7.0})
-        self.assertEqual(a[0][0], "P2")            # on-target <8
-        self.assertIn("on-target", a[0][1])
-        self.assertEqual(alerts.check_capture({"A": 80.0}, {"A": 97.0}, {"A": 8.5}), [])
-        self.assertEqual(alerts.check_capture({"A": 80.0}, {"A": 97.0}, {"A": 70.0}), [])
+        a = alerts.check_capture({"A": 60.0}, {"A": 96.0}, {"A": 84.0})
+        self.assertEqual(a[0][0], "P2")            # PCT_SELECTED <85
+        self.assertIn("捕获效率", a[0][1])
+        self.assertEqual(alerts.check_capture({"A": 80.0}, {"A": 97.0}, {"A": 85.0}), [])
+        # on-target 任意低值（1bp SNP panel 下 ≈0.6%）不触发告警
+        self.assertEqual(alerts.check_capture({"A": 80.0}, {"A": 97.0}, {"A": 90.0}), [])
 
     def test_variantqc(self):
         self.assertEqual(alerts.check_variantqc(1.9, 99.0)[0][0], "P2")

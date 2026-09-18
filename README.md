@@ -278,7 +278,7 @@ zip 超钉钉 20MB 上限时自动分卷压缩发送（每卷独立合法 zip �
 | Step 3 · 去重 | 重复率 >30%（建库复杂度告急） | P2 |
 | Step 5 · 对账·数量 | 矩阵行数 ≠ 靶区记录数（view -R 同口径对账，DEC-11） | P2 |
 | Step 5 · 对账·新鲜度 | 关键 VCF mtime < 本次启动（断点续跑复用旧产物） | P2 |
-| Step 6 · 捕获/覆盖/口径 | on-target <8% / mean depth <50× / 20X <95% / Ti/Tv <2.0 / call rate <95% | P2 |
+| Step 6 · 捕获/覆盖/口径 | 捕获效率 PCT_SELECTED <85% / mean depth <50× / 20X <95% / Ti/Tv <2.0 / call rate <95% | P2 |
 | Step 6 · 深度离散 | 批次内 mean depth 变异系数 CV >0.5（疑似混入异常样本） | P2 |
 | Step 1 · NTC reads | NTC reads 占批次中位样本 >1%（污染维度之二，与深度互补） | P2 |
 | Step 4 · 校准可信 | BQSR recal M 事件观测数 <10 万（known-sites 覆盖异常，校准不可信） | P2 |
@@ -291,8 +291,9 @@ zip 超钉钉 20MB 上限时自动分卷压缩发送（每卷独立合法 zip �
   → 节段重复区正常现象，告警不报错）
 - dup>30% 且 ELS 偏小 → 文库复杂度不足告警；去重前 flagstat 的 duplicates 行不采集
 - **BQSR 前后 flagstat 逐行 diff 必须一致，不一致判 FAIL**（该样本退出变异检测）
-- MEAN/MED_TARGET_COVERAGE ≥50×、PCT_TARGET_BASES_20X ≥90%；on-target≈on-bait 约
-  8-10%；PCT_SELECTED_BASES(25-28%) 是含邻域口径，不误读为捕获效率
+- MEAN/MED_TARGET_COVERAGE ≥50×、PCT_TARGET_BASES_20X ≥90%；捕获效率 = PCT_SELECTED_BASES
+  ≥85%（v2.19.0/DEC-29：(on+near bait)/比对碱基，与外送 pct_selected_bases 同口径；新 panel
+  实测 89-91%）；on-target 降为信息指标不告警（1bp SNP panel 下 ≈0.6% 为几何产物）
 - `*`（spanning deletion）不计入 SNP/INDEL；MIXED/多等位先 norm 摊平再分拣
 - FILTER 列出现 `.` = 过滤漏跑，判错；Ti/Tv raw→PASS 应上升（看趋势不看绝对值）
 - 矩阵 `./.`：mosdepth bqsr regions 深度 DP≥20（`GWAS_DP_MIN` 可配）改判 0/0，不足保留 `./.`；
@@ -314,7 +315,7 @@ zip 超钉钉 20MB 上限时自动分卷压缩发送（每卷独立合法 zip �
 | 8 | 笔记散述"bcftools isec 求交集/差集" | norm 后 (CHROM,POS) 键集合 Python 交/差 | 等价实现：norm 后键唯一；GT 级比较仍需逐条查询 |
 | 9 | 笔记 CollectHsMetrics 先用 markdup.bam（3-9）后用 BQSR bam（5-5） | 统一用 BQSR bam（5-5/Step 6 口径） | mosdepth 双跑（md+bqsr）保留对照 |
 | 10 | 笔记输出至工作区根部（qc/ bam/ gvcf/ …） | 全部收进 `results/<批次>_<执行日期>/` | 批次隔离与安全边界要求 |
-| 11 | 笔记散述 HsMetrics/捕获口径 | on-target P1 阈值取 8%（panel 正常 8-10%） | PCT_SELECTED(25-28%)/on-bait 不得误作 on-target |
+| 11 | 笔记散述 HsMetrics/捕获口径 | 捕获效率告警 = PCT_SELECTED ≥85%，on-target 不告警（信息指标）（v2.19.0/DEC-29） | 老结论"PCT_SELECTED(25-28%) 不误作捕获效率"系老 panel 观测，已废止——新 panel 下与外送 pct_selected_bases 交叉验证一致（<0.2pp 偏差） |
 | 12 | 笔记 BedToIntervalList 无 `--UNIQUE`/`--DROP_MISSING_CONTIGS` | 固定 `--UNIQUE true --DROP_MISSING_CONTIGS true`（DEC-26） | 新 panel bed 含字典外 ALT contig（否则 PicardException 中断）；重叠/相邻探针区间合并为唯一区间，靶区碱基按唯一口径（实测 31310→18339bp） |
 
 其余分析学内容（命令、参数语义、阈值：fastp length_required 36、bwa `-K 100000000 -Y`、

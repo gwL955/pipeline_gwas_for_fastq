@@ -280,11 +280,15 @@ def parse_hsmetrics(path):
 
 
 def qc_hsmetrics(hs, logger, control=False):
-    """MEAN/MED ≥50×、20X ≥90%（数据质量告警级）；on-target≈on-bait（约 8-10%）；
-    PCT_SELECTED_BASES（25-28%）是含邻域口径，不得误读为捕获效率。
+    """MEAN/MED ≥50×、20X ≥90%、捕获效率 PCT_SELECTED ≥85%（数据质量告警级）。
+    捕获效率口径 v2.19.0/DEC-29：PCT_SELECTED_BASES（on+near bait / 比对碱基，
+    与外送报告 pct_selected_bases 同口径）；on-target 仅信息指标——1bp SNP panel
+    下 ON_TARGET_BASES 只计区间内碱基（≈0.6%），是 panel 几何产物不反映捕获好坏，
+    旧文档"PCT_SELECTED(25-28%) 不误读为捕获效率"是老 panel 时代的结论，已废止。
     control=True（NTC 等对照）：近零覆盖是预期，只记录不判阈值。"""
     mean, med = hs.get("MEAN_TARGET_COVERAGE"), hs.get("MEDIAN_TARGET_COVERAGE")
     p20 = hs.get("PCT_TARGET_BASES_20X")
+    psel = hs.get("PCT_SELECTED_BASES")
     level, tag = (logger.info, "对照样本") if control else (logger.warn, "告警")
     if control:
         logger.result(f"HsMetrics[对照]: MEAN={mean}× 20X="
@@ -294,10 +298,12 @@ def qc_hsmetrics(hs, logger, control=False):
         level(f"MEAN_TARGET_COVERAGE {mean}× < {config.MEAN_COV_MIN}×（{tag}）")
     if p20 is not None and p20 * 100 < config.PCT_20X_MIN:
         level(f"PCT_TARGET_BASES_20X {p20*100:.1f}% < {config.PCT_20X_MIN}%（{tag}）")
+    if psel is not None and psel * 100 < config.PCT_SELECTED_P1:
+        level(f"捕获效率 PCT_SELECTED {psel*100:.1f}% < {config.PCT_SELECTED_P1}%（{tag}）")
     logger.result(
         f"HsMetrics: MEAN={mean}× MED={med}× 20X={p20*100 if p20 is not None else '?'}% "
-        f"on-bait={hs.get('ON_BAIT_PCT')}% on-target={hs.get('ON_TARGET_PCT')}% "
-        f"PCT_SELECTED={hs.get('PCT_SELECTED_BASES')}（含±250bp 邻域口径，非捕获效率）")
+        f"捕获效率PCT_SELECTED={psel*100 if psel is not None else '?'}% "
+        f"on-bait={hs.get('ON_BAIT_PCT')}% on-target={hs.get('ON_TARGET_PCT')}%（信息指标，不告警）")
     return True
 
 

@@ -805,6 +805,10 @@ class BatchCtx:
                         hs.get("MEAN_TARGET_COVERAGE")
                     self.metrics.setdefault("pct_20x", {})[sm] = \
                         round((hs.get("PCT_TARGET_BASES_20X") or 0) * 100, 2)
+                    # 捕获效率告警口径 = PCT_SELECTED_BASES（DEC-29）；
+                    # on_target_pct 保留为信息指标（1bp SNP panel 下 ≈0.6%，不再告警）
+                    self.metrics.setdefault("pct_selected", {})[sm] = \
+                        round((hs.get("PCT_SELECTED_BASES") or 0) * 100, 2)
                     self.metrics.setdefault("on_target_pct", {})[sm] = \
                         hs.get("ON_TARGET_PCT")
                 if not ok:
@@ -918,7 +922,7 @@ class BatchCtx:
                              f"裁决 {len(self.bdata.get('_adj_vcfs') or {})} 样本",
                      metrics=f"mean depth {_avg(self.metrics.get('mean_target_coverage'))}× | "
                              f"20X {_avg(self.metrics.get('pct_20x'))}% | "
-                             f"on-target {_avg(self.metrics.get('on_target_pct'))}% | "
+                             f"捕获效率(selected) {_avg(self.metrics.get('pct_selected'))}% | "
                              f"call rate {call_rate}% | "
                              f"Ti/Tv PASS {self.cohort_stats.get('PASS', {}).get('titv')}"
                              + (f" | NTC 深度 {ntc_depth}×" if ntc_depth is not None else ""),
@@ -926,7 +930,7 @@ class BatchCtx:
                                + alerts.check_capture(
                                    self.metrics.get("mean_target_coverage"),
                                    self.metrics.get("pct_20x"),
-                                   self.metrics.get("on_target_pct"))
+                                   self.metrics.get("pct_selected"))
                                + alerts.check_variantqc(
                                    self.cohort_stats.get("PASS", {}).get("titv"), call_rate)
                                + alerts.check_ntc(ntc_depth)
