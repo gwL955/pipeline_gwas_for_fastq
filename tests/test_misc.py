@@ -7,6 +7,7 @@ import io
 import os
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -547,6 +548,8 @@ class TestIntervalListPrep(unittest.TestCase):
         cmds = []
 
         class R:
+            dry_run = True      # prep 的新鲜度重建 post-check 只在实跑校验产物
+
             def run(self, cmd, logger=None, outputs=(), timeout=None, capture=False):
                 cmds.append(cmd)
                 return 0
@@ -566,12 +569,17 @@ class TestIntervalListPrep(unittest.TestCase):
 
     def test_bedtointervallist_flags(self):
         """两参数必须同时在命令行上：漏 --DROP_MISSING_CONTIGS 遇 ALT contig 必中断；
-        漏 --UNIQUE 重叠探针虚增靶区碱基（HsMetrics 口径失真）"""
+        漏 --UNIQUE 重叠探针虚增靶区碱基（HsMetrics 口径失真）。
+        awk 侧必须带 genome.dict contig 白名单（DEC-28）：漏过滤则 bed 中字典外
+        contig（ALT）进 sorted.bed，坑留给 bcftools/mosdepth"""
         with tempfile.TemporaryDirectory() as td:
             ok, cmds = self._prep(td)
             self.assertTrue(ok)
             self.assertEqual(len(cmds), 2)          # awk 排序去重 + BedToIntervalList
             self.assertIn("sort -k1,1V -k2,2n -u", cmds[0])   # bed 级去完全重复行
+            self.assertIn("NR==FNR", cmds[0])         # 字典白名单装载（DEC-28）
+            self.assertIn("$1 in c", cmds[0])         # bed 行 contig 必须在白名单内
+            self.assertIn("genome.dict", cmds[0])     # 字典作为 awk 首输入
             gatk_cmd = cmds[1]
             self.assertIn("BedToIntervalList", gatk_cmd)
             self.assertIn("--UNIQUE true", gatk_cmd)
@@ -579,11 +587,89 @@ class TestIntervalListPrep(unittest.TestCase):
             self.assertIn("-SD", gatk_cmd)
 
     def test_interval_list_idempotent_skip(self):
-        """sorted.bed 与 interval_list 均已存在（非空）→ 零命令直接放行（REQ-04 幂等）"""
+        """sorted.bed 与 interval_list 均已存在（非空且不旧）→ 零命令直接放行（REQ-04 幂等）"""
         with tempfile.TemporaryDirectory() as td:
             ok, cmds = self._prep(td, sorted_exists=True, interval_exists=True)
             self.assertTrue(ok)
             self.assertEqual(cmds, [])
+
+    def test_derived_targets_stale_rebuild(self):
+        """★ 派生靶区新鲜度锚（DEC-28/RUN-42）：源 bed 更新（mtime 更新）后，
+        已存在且非空的 sorted.bed 必须重建——曾只看非空即跳过，换 bed 后旧派生
+        文件（含 ALT contig 行）一路带进下游；interval_list 同理随 sorted.bed 失效"""
+        with tempfile.TemporaryDirectory() as td:
+            ok, cmds = self._prep(td, sorted_exists=True, interval_exists=True)
+            self.assertEqual(cmds, [])                       # 新鲜 → 全跳过
+            os.utime(os.path.join(td, "targets.bed"),
+                     (time.time() + 5, time.time() + 5))     # 源 bed 更新
+            ok, cmds = self._prep(td)
+            self.assertTrue(ok)
+            self.assertEqual(len(cmds), 1)                   # 只重建 sorted.bed
+            self.assertTrue(cmds[0].startswith("awk"))
+            os.utime(os.path.join(td, "targets.sorted.bed"),
+                     (time.time() + 5, time.time() + 5))     # sorted.bed 更新
+            ok, cmds = self._prep(td)
+            self.assertTrue(ok)
+            self.assertEqual(len(cmds), 1)                   # 只重建 interval_list
+            self.assertIn("BedToIntervalList", cmds[0])
+
+    def test_haplotypecaller_uses_interval_list(self):
+        """★ HC -L 口径锚（DEC-28/RUN-42）：-L 必须用 interval_list（字典口径+
+        DEC-26 唯一合并），不得用 sorted.bed——GATK 引擎对 -L 区间 contig 严格
+        校验字典，bed 含字典外 contig 即 USER ERROR（实跑三样本 HC 全灭）"""
+        from modules import gatk as mgatk
+        cmds = []
+
+        class R:
+            def run(self, cmd, logger=None, outputs=(), timeout=None, capture=False):
+                cmds.append(cmd)
+                return 0
+
+            def tool(self, sif_key, args, binds=None):
+                return f"singularity:{sif_key} {args}"
+
+            def cpath(self, path):
+                return path
+
+        with mock.patch.object(config, "TARGETS_INTERVAL_LIST",
+                               "/x/targets.sorted.interval_list"), \
+                mock.patch.object(config, "TARGETS_SORTED_BED",
+                                  "/x/targets.sorted.bed"):
+            ok = mgatk.haplotypecaller(R(), "/x/a.bam", "/x/a.g.vcf.gz",
+                                       "2g", 2, _FakeLog())
+        self.assertTrue(ok)
+        self.assertIn("-L /x/targets.sorted.interval_list", cmds[0])
+        self.assertNotIn("targets.sorted.bed", cmds[0])
+
+
+class TestBatchExceptionPath(unittest.TestCase):
+
+    def test_batch_exception_path_no_unbound_notify(self):
+        """★ 失败路径锚（RUN-42）：step 中途异常时 except 分支不得再抛
+        UnboundLocalError——曾引用仅在成功汇总段才赋值的局部 notify_on，导致
+        钉钉失败通知发不出、且裸 traceback 炸穿 main()（nohup 下控制台止于
+        日志路径行，报错只埋在 run log，形同"无通知无报错"静默死亡）"""
+        import subprocess
+        with tempfile.TemporaryDirectory() as td:
+            bdir = os.path.join(td, "in", "测试批次")
+            os.makedirs(bdir)
+            for r in ("R1", "R2"):
+                with open(os.path.join(
+                        bdir, f"NA12878_S1_L001_{r}_001.fastq.gz"), "wb") as f:
+                    f.write(b"@x\nACGT\n+\nIIII\n")
+            env = {**os.environ, **_dep_env(td),
+                   "GWAS_RESULTS": os.path.join(td, "results")}
+            r = subprocess.run(
+                [sys.executable,
+                 os.path.join(os.path.dirname(os.path.dirname(
+                     os.path.abspath(__file__))), "run_pipeline.py"),
+                 "--dry-run", "--resource-profile", "low", "--notify", "off",
+                 "--input", os.path.join(td, "in")],
+                env=env, capture_output=True, text=True, timeout=90)
+            combined = r.stdout + r.stderr
+            self.assertEqual(r.returncode, 1, combined[-500:])   # 批次 P0 失败
+            self.assertIn("批次 测试批次 失败", combined)   # except 分支完整走完
+            self.assertNotIn("UnboundLocalError", combined)   # 修复锚：不再二次崩
 
 
 if __name__ == "__main__":

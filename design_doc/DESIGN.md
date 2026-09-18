@@ -3,7 +3,7 @@
 ```yaml
 # ---- design-meta（机器可解析锚点，勿手改格式；版本规则见 §0）----
 doc: GWAS-pipeline-design
-version: 2.17.0
+version: 2.18.0
 updated: 2026-09-18
 owner_human: gewenlong
 owner_machine: ZCode(GLM)
@@ -65,7 +65,7 @@ consistency_check: pipeline/check_design.py      # TH 表 ↔ config.py 防漂�
 | REQ-01 | Step 0-6 全流程（笔记 0-5 口径逐字一致，流程规格见 §3.1） | ✅ 完成 | RUN-05/07/08/19 |
 | REQ-02 | 模块化架构（run_pipeline/config/logger/runner/resource/scanner/dingtalk/report/alerts/check_design + modules/8 软件模块） | ✅ 完成 | pipeline/ 目录 |
 | REQ-03 | 资源自适应：探测(cgroup/WSL2/affinity)→分档推导→内存收紧→钳位；禁写死参数；快速失败；计划透明（推导表见 §5.3） | ✅ 完成 | RUN-10~14；DEC-03 |
-| REQ-04 | 幂等断点续跑：产物存在且非空即 SKIP，只补缺失（含 .tbi/.metrics/.table；各步幂等键见 §3.1） | ✅ 完成 | RUN-09（31 SKIP 结果一致） |
+| REQ-04 | 幂等断点续跑：产物存在且非空即 SKIP，只补缺失（含 .tbi/.metrics/.table；各步幂等键见 §3.1）；**例外：靶区派生文件（sorted.bed/interval_list）随源 mtime 失效重建（DEC-28）** | ✅ 完成 | RUN-09（31 SKIP 结果一致）；RUN-42 |
 | REQ-05 | 批次独立 + 多批次失败隔离；任一批失败退出码非零（退出码语义见 §7.3） | ✅ 完成 | RUN-07/08 |
 | REQ-06 | 输入校验：三种布局自动识别（Illumina 平铺/外送子目录/外送平铺，DEC-23）；R1/R2 不匹配/单端/0字节/命名无效标记跳过；md5sum.txt 并行校验（失败 P0 阻断） | ✅ 完成 | tests/test_scanner.py |
 | REQ-07 | 安全边界：0_raw_data/back 只读；产物仅写 results/ 与 Output/ 交付目录 | ✅ 完成 | 全程无违规写入 |
@@ -110,7 +110,8 @@ $WORK/
 参考文件（`$WORK/reference/`，依赖缺失即 P0 阻断）：`genome/genome.fa(+.fai/.dict)`
 （hg38 + bwa-mem2 索引）、`targets.bed`（**私密文件，绝不入仓库**——.gitignore 拦截
 `*.bed`/`*.interval_list`，路径经 `GWAS_TARGETS_BED` 改址，运行时派生
-sorted.bed/interval_list 与 bed 同目录生成）、
+sorted.bed/interval_list 与 bed 同目录生成；sorted.bed 按 genome.dict 过滤 contig
+〔字典外行丢弃并 WARN 点名〕、派生文件随源 mtime 失效重建，DEC-28）、
 `Homo_sapiens_assembly38.dbsnp138.vcf.gz`、`Mills_and_1000G_gold_standard.indels.hg38.vcf.gz`。
 
 ### 3.1 Step 0-6 流程规格（每步：操作 → 产物〔幂等键〕→ 分级检查）
@@ -122,7 +123,7 @@ sorted.bed/interval_list 与 bed 同目录生成）、
 | **2 比对** | `bwa-mem2 mem -K 100000000 -Y -R '@RG…SM:样本' | samtools sort -@T -m SORT_MEM`（管道流式）→ `samtools index` → flagstat/stats | `bam/<样本>/<样本>.sort.bam(+.bai)`〔sort.bam+.bai〕、`qc/flagstat|stats`〔对应文件〕 | P1：mapped<90 QC 口径（TH-05，报错不中断）；P2：mapped<95/pp<85（TH-06/07） |
 | **3 去重** | `gatk MarkDuplicates` → markdup.bam + metrics → flagstat/stats（去重前 duplicates 行不采集） | `bam/<样本>/<样本>.markdup.bam`〔markdup.bam+metrics〕 | P2：dup>30%（TH-09） |
 | **4 BQSR** | `gatk BaseRecalibrator`（dbsnp+Mills）→ recal.table → `ApplyBQSR` → **BQSR 前后 flagstat 逐行一致断言**（不一致该样本失败隔离） | `bam/<样本>/<样本>.recal.table`、`<样本>.markdup.BQSR.bam`〔BQSR bam+table〕 | P2：recal M 事件观测数<1e5（TH-36，校准不可信） |
-| **5 变异检测** | BedToIntervalList 准备（`--UNIQUE true` 重叠/相邻区间去重合并 + `--DROP_MISSING_CONTIGS true` 丢字典外 contig，DEC-26） → 每样本 `gatk HaplotypeCaller -ERC GVCF`（靶区±100bp，样本级并行）→ gvcf.list（sorted，DEC-05）→ 批次内 `CombineGVCFs→GenotypeGVCFs`（串行）→ `bcftools norm -m -any` → SelectVariants SNP/INDEL → VariantFiltration 硬过滤（SNP：QD2/QUAL30/SOR3/FS60/MQ40/MQRankSum/ReadPosRankSum；INDEL：QD2/QUAL30/SOR10/FS200/ReadPosRankSum）→ concat → **FILTER 列出现 `.` 判错** → PASS 提取 → 双口径矩阵导出（`query -R`）+ 每样本 hardfiltered/PASS 拆分（`view -s`） | `gvcf/<样本>.g.vcf.gz`、`cohort/cohort.{raw→split→snp/indel→hardfiltered→PASS}.vcf.gz`、`matrix/genotype_matrix.tsv`、`matrix/genotype_detail_PASS.tsv`、`per_sample_vcf/<样本>.{hardfiltered,PASS}.vcf.gz` | cohort 级失败 raise 中断批次；P2：对账·数量（矩阵行数 vs `view -R` 计数，DEC-11 同口径）、对账·新鲜度（关键 VCF mtime<启动） |
+| **5 变异检测** | BedToIntervalList 准备（`--UNIQUE true` 重叠/相邻区间去重合并 + `--DROP_MISSING_CONTIGS true` 丢字典外 contig，DEC-26；sorted.bed 生成按 genome.dict 过滤 contig、派生文件随源 mtime 失效重建，DEC-28） → 每样本 `gatk HaplotypeCaller -ERC GVCF`（**-L interval_list** 字典口径，DEC-28；靶区±100bp，样本级并行）→ gvcf.list（sorted，DEC-05）→ 批次内 `CombineGVCFs→GenotypeGVCFs`（串行）→ `bcftools norm -m -any` → SelectVariants SNP/INDEL → VariantFiltration 硬过滤（SNP：QD2/QUAL30/SOR3/FS60/MQ40/MQRankSum/ReadPosRankSum；INDEL：QD2/QUAL30/SOR10/FS200/ReadPosRankSum）→ concat → **FILTER 列出现 `.` 判错** → PASS 提取 → 双口径矩阵导出（`query -R`）+ 每样本 hardfiltered/PASS 拆分（`view -s`） | `gvcf/<样本>.g.vcf.gz`、`cohort/cohort.{raw→split→snp/indel→hardfiltered→PASS}.vcf.gz`、`matrix/genotype_matrix.tsv`、`matrix/genotype_detail_PASS.tsv`、`per_sample_vcf/<样本>.{hardfiltered,PASS}.vcf.gz` | cohort 级失败 raise 中断批次；P2：对账·数量（矩阵行数 vs `view -R` 计数，DEC-11 同口径）、对账·新鲜度（关键 VCF mtime<启动） |
 | **6 汇总与交付** | mosdepth×2（markdup/BQSR bam）→ `CollectHsMetrics`（BQSR bam）→ **矩阵 `./.` 裁决**（mosdepth bqsr regions 深度 DP≥TH-15 改判 0/0）→ 每样本 PASS VCF 重建（`view -s` + GT 替换，其余字段原样）→ **MultiQC 最终报告（此时全部流程结束、QC 齐全）** → 交付导出 Output/ | `qc/mosdepth|hs metrics|multiqc`、`matrix/genotype_matrix.adjudicated.tsv`、`per_sample_vcf/<样本>.PASS.adjudicated.vcf.gz(+.tbi)`、`Output/<批次>_<日期>/` 全套 | P1：PASS 裁决 VCF 0 记录（交付为空）、NTC 靶深>10×（TH-21）；P2：on-target<8/depth<50/20X<95/Ti-Tv<2.0/call rate<95（TH-14/11/13/22/23）、批次深度 CV>0.5（TH-35） |
 | 每步之后 | `disk_guard`：Step 间磁盘复查 | — | P0：剩余<DISK_MIN_FREE_GB 立即终止批次（TH-24） |
 
@@ -158,6 +159,7 @@ cohort 级与 MultiQC 串行。样本失败即隔离（记入 failed，退出后
 | DEC-25 | **results/ 归档脚本（archive_results.py）**：扫描 `<批次>_<YYYYMMDD>` 目录，执行日期距今超 `--days`（默认 30）→ `7z a -t7z -mx=9 -mfb=192 -ms=on -md=256m -snl -mmt -sdel <dest.7z> <src>`（用户指定口径；-sdel=压缩成功后删源，失败自动保留）；输出 `GWAS_ARCHIVE_DIR`（默认 `$WORK/archive/`）；幂等（同名 .7z 已存在跳过）；`--dry-run` 只列不动；非批次命名目录跳过；离线维护工具，不属于流程运行时 | results/ 批次目录无限累积占盘（RUN-39 用户要求）；-sdel 把"删源"安全性交给 7z 自身语义 |
 | DEC-26 | **interval_list 生成参数收紧（v2.16.0）**：BedToIntervalList 固定 `--UNIQUE true --DROP_MISSING_CONTIGS true`——UNIQUE 把重叠/相邻区间合并为唯一区间（sorted.bed 的 `sort -u` 只去完全重复行，探针重叠需靠 UNIQUE 摊平；HsMetrics 靶区按唯一口径计深度，不因重叠虚增碱基数）；DROP_MISSING_CONTIGS 丢弃 bed 中序列字典（genome.dict，194 序列、无 ALT）不存在的 contig 而非 PicardException 中断 | 新 panel bed 按 GRCh38 完整版（含 ALT，如 chr22_KI270879v1_alt）制定，与比对参考不一致，首跑即 `Sequence not found` 中断（RUN-40）；实测重叠探针致靶区虚标 31310bp，唯一口径实为 18339bp |
 | DEC-27 | **交付超限分卷发送（v2.17.0）**：整包 zip >20MB 时不再只发说明消息——按文件分组打成多卷（`<批次>_partNNofMM.zip`，卷预算=上限 95%、每卷独立合法 zip），说明消息点名卷数与"全部下载解压到同一目录"合并方法，逐卷发文件卡片；单文件超卷预算点名跳过（消息提示到服务器取）；卷数超 `MAX_VOLUMES`（25，钉钉 20 条/分钟限流防刷屏）回落纯说明消息 | 钉钉文件白名单只认 xlsx/pdf/zip/rar/doc/docx，`.zip.001`/`.z01` 等真分卷后缀上传必被拒——每卷独立 zip 是白名单约束下"分卷压缩发送"的唯一可行实现（收方免 cat 合并）；大批次交付整包超 20MB 时此前只能弃发文件（RUN-41 用户要求） |
+| DEC-28 | **失败路径健壮性 + 靶区派生口径（v2.18.0）**：①process_batch 异常分支改用 `ctx.notify_on`（进 try 前即赋值）——曾读仅在成功汇总段赋值的局部 `notify_on`，step 中途抛异常即 UnboundLocalError：失败通知发不出且裸 traceback 炸穿 main()；②HC `-L` 改用 interval_list（字典口径+DEC-26 唯一合并）不用 sorted.bed——GATK 引擎对 -L 区间 contig 严格校验字典，bed 含字典外 contig 即 USER ERROR（samtools -L/mosdepth --by 实测容忍，bcftools/mosdepth 仍用 bed）；③sorted.bed 生成 awk 增 genome.dict contig 白名单（`$1 in c`，字典外行丢弃、_bed_contigs−_dict_contigs 差集 WARN 点名）；④派生靶区文件新鲜度 `_derived_stale`：源 mtime 更新即重建（重建命令不传 runner outputs——陈旧但非空会被 runner 自身幂等误跳过，幂等判断上收 prep） | RUN-42 实跑事故三层：新 panel bed 含 chr22_KI270879v1_alt → 三样本 HC 全部 exit 2 → except 崩于 notify_on → 无通知+裸 traceback（nohup 控制台止于日志路径行，形同静默死亡）；且 sorted.bed 为手工符号链接非空被幂等跳过，换 bed 后陈旧派生一路带进下游 |
 
 ## 5. 统一口径与阈值总表（TH = config.py 镜像）<!-- HUMAN 可改值；MACHINE 同步 config 后过校验 -->
 
@@ -353,14 +355,14 @@ results/260422_20260914/                     Output/260422_20260914/
 | test_variant_post.py | 矩阵 `./.` 裁决、重建只换 GT、GT 列显式映射、norm outputs 口径 |
 | test_archive.py | 归档脚本：超期目录筛选（名后缀日期/边界>30 天/非法日期跳过）、7z 命令口径锚（8 参数含 -sdel）、幂等跳过、失败保留源、真实 7z 往返（skipUnless 本机有 7z） |
 | test_envfile.py | .env 解析语法、三源优先级、webhook 默认空、防回潮锚（源码无 access_token=）、降级、**靶区 bed 改址锚（GWAS_TARGETS_BED 只指 bed 本体、派生文件随同目录，RUN-38）** |
-| test_misc.py | tee 自动落盘、**实跑静默锚（控制台止于日志路径提示行，处理日志只进 run_<ts>.log，RUN-37）**、目录命名、跨午夜锚、全流程 dry-run success+零落盘锚、**样本名 P0 阻断锚（含中文点名，RUN-38）**、**批次名中文 P0 阻断锚（RUN-38）**、**.gitignore 拦截私密 bed 锚（RUN-38）**、**BedToIntervalList 参数锚（--UNIQUE/--DROP_MISSING_CONTIGS + 幂等跳过，RUN-40）**、--input 覆盖锚、--version、MultiQC 时序锚（step6 方法）、交付导出（Output 命名/md5sum/MANIFEST/MultiQC extra/幂等）、INDEX 累积锚、disk_guard、外送平铺布局端到端锚（RUN-36） |
+| test_misc.py | tee 自动落盘、**实跑静默锚（控制台止于日志路径提示行，处理日志只进 run_<ts>.log）**、目录命名、跨午夜锚、全流程 dry-run success+零落盘锚、**样本名 P0 阻断锚（含中文点名，RUN-38）**、**批次名中文 P0 阻断锚（RUN-38）**、**.gitignore 拦截私密 bed 锚（RUN-38）**、**BedToIntervalList 参数锚（--UNIQUE/--DROP_MISSING_CONTIGS + awk 字典过滤 + 幂等跳过，RUN-40/42）**、**派生靶区新鲜度锚（源 mtime 更新→逐级重建，DEC-28）**、**HC -L interval_list 口径锚（DEC-28）**、**异常路径无 UnboundLocalError 锚（RUN-42：批次失败时 except 完整走完、不再二次崩）**、--input 覆盖锚、--version、MultiQC 时序锚（step6 方法）、交付导出（Output 命名/md5sum/MANIFEST/MultiQC extra/幂等）、INDEX 累积锚、disk_guard、外送平铺布局端到端锚（RUN-36） |
 
 `./run_tests.sh` = unittest 全量 + `check_design.py`（TH↔config + 版本双源）；
 CI（.github/workflows/ci.yml）在 py3.10/3.12 矩阵执行。
 
 ### 9.2 迁移/重建验证顺序（DEC-12）
 
-1. `./run_tests.sh` 全绿（全部用例数见 §9.1 各文件，当前共 131）
+1. `./run_tests.sh` 全绿（全部用例数见 §9.1 各文件，当前共 134）
 2. `cp .env.example .env` 填 webhook → `python3 run_pipeline.py --notify-test`（连通性）
 3. `python3 run_pipeline.py --dry-run --batch <小批次>`（容器/参考文件/路径与资源计划）
 4. `python3 run_pipeline.py --resource-profile low --dry-run`（低配档口径）
@@ -368,7 +370,7 @@ CI（.github/workflows/ci.yml）在 py3.10/3.12 矩阵执行。
 
 ### 9.3 重建完成判据
 
-131 用例 + check_design 全绿；`--version` 输出与本文档 version 一致；dry-run 零落盘；
+134 用例 + check_design 全绿；`--version` 输出与本文档 version 一致；dry-run 零落盘；
 单批次实跑 success 且 Step 6 交付目录含 VCF+tbi+MultiQC，`md5sum -c` 全过。
 
 ## 10. 变更日志（CHANGELOG）<!-- 人机共写：每方改动各记一行 -->
@@ -417,6 +419,8 @@ CI（.github/workflows/ci.yml）在 py3.10/3.12 矩阵执行。
 | 2.16.0 | 2026-09-18 | 机 | DEC-26：BedToIntervalList 固定 --UNIQUE true --DROP_MISSING_CONTIGS true（sorted.bed 的 sort -u 只去完全重复行，相邻/重叠区间靠 UNIQUE 合并）；README §8 差异表增第 12 行；测试 128→130（参数锚+幂等跳过锚）；RUN-40（真实容器实测：12014 行 bed → 11972 唯一区间/18339bp，丢弃 4 个 ALT 1bp 区间） |
 | 2.17.0 | 2026-09-18 | 人 | 两项：①参考选择结论（比对参考用 genome/genome.fa 而非 bundle hg38.fa 的取舍分析）写入内部 README_pipeline.md；②钉钉交付 zip 超 20MB 不再只发说明消息，改为分卷压缩发送 |
 | 2.17.0 | 2026-09-18 | 机 | DEC-27：send_zip_dir 超限分支重写——_make_volumes 按卷预算（上限 95%）把交付文件分组打成多卷独立合法 zip（partNNofMM；白名单只认 zip 等五后缀，.zip.001 真分卷后缀必被拒），说明消息点名卷数与"解压到同一目录"合并方法，单卷装不下点名跳过，卷数>MAX_VOLUMES(25) 回落纯说明消息；run_pipeline 交付推送注释同步；参考选择分析写入 design_doc/README_pipeline.md（内部版，gitignored）§2.1；测试 130→131（分卷/卷数上限两用例，原超限用例改写）；RUN-41（真实分卷链路实发验证） |
+| 2.18.0 | 2026-09-18 | 人 | 修复实跑暴露的两项：①批次失败时钉钉通知发不出（except 分支引用未赋值变量先崩，裸 traceback 炸穿 main()）；②HC -L 用含 ALT contig 的 bed 三样本全灭——靶区 bed 侧按字典过滤根治，且换 bed 后派生文件要自动重建 |
+| 2.18.0 | 2026-09-18 | 机 | DEC-28 四件套：①except/成功两分支统一用 ctx.notify_on；②HC -L 改 interval_list（bed 留给 bcftools/mosdepth——实测容忍字典外 contig）；③sorted.bed 生成 awk 按 genome.dict 白名单过滤（丢弃 contig WARN 点名）；④_derived_stale 派生靶区新鲜度（源 mtime 更新即重建，重建命令不传 runner outputs 防幂等误跳）；REQ-04 登记例外；测试 131→134（awk 字典过滤锚/新鲜度逐级重建锚/HC interval_list 锚/E2E 异常路径无 UnboundLocalError 锚——修复前必红）；RUN-42（部署：sorted.bed 符号链接换字典过滤实文件、interval_list 重建、dry-run 实测 -L interval_list） |
 
 ## 11. 证据索引 <!-- MACHINE -->
 
@@ -425,7 +429,7 @@ CI（.github/workflows/ci.yml）在 py3.10/3.12 矩阵执行。
 | 运行台账（每轮） | pipeline/design_doc/RUN_HISTORY.md |
 | 验收运行（0_raw_data_test） | results/260422_20260914/、results/260422_20260916/ 等（运行日志在各批次 logs/） |
 | 交付 | Output/<批次>_<日期>/ + INDEX.md（累积） |
-| 测试集与 CI | pipeline/tests/（131 用例）+ run_tests.sh + .github/workflows/ci.yml |
+| 测试集与 CI | pipeline/tests/（134 用例）+ run_tests.sh + .github/workflows/ci.yml |
 | 使用说明/与笔记差异 | pipeline/README.md |
 | 环境参数 | pipeline/.env（密钥，600）+ pipeline/.env.example（模板） |
 | 命令参考快照 | pipeline/design_doc/notes_code_reference.md |

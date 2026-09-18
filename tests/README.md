@@ -1,6 +1,6 @@
 # pipeline 单元测试集（迁移/改动后的快速回归）
 
-**纯 Python 标准库，无容器、无网络、无真实数据，约 5 秒跑完 131 个用例。**
+**纯 Python 标准库，无容器、无网络、无真实数据，约 5 秒跑完 134 个用例。**
 每个用例对应本项目开发/运行中的真实踩坑或硬性口径，改动代码后先跑本测试再跑真实数据。
 
 ## 运行
@@ -23,11 +23,11 @@ cd pipeline
 | `test_parsers.py` | fastqc zip（小写状态）、fastp json、markdup/hsmetrics 按表头名、flagstat、samtools stats、bcftools stats、norm 统计、mosdepth summary | fastqc 状态是小写 pass/fail（曾按大写比较误报）；bcftools stats SN 行带文件 ID 列；norm 统计行是 7 字段动态表头；mosdepth 是 6 列且靶区深度取 `total_region` 行；flagstat `in total` 行无百分比（本测试集修复的潜伏 bug）；recal 观测数按 RecalTable1 表头名取列只加 M 行（RUN-34） |
 | `test_variant_post.py` | 矩阵 `./.` 裁决（DP≥20/cells_total）、rebuild 只换 GT、GT 列显式映射、**norm_split 产物检查口径（norm 不查 .tbi）** | **GT 列序互换**曾致两样本基因型对调；矩阵列序必须按 calling 顺序显式映射；norm 命令 outputs 曾混入 .tbi（由后续 index 命令生成），首跑必误报"产物缺失"（RUN-29 修复） |
 | `test_archive.py` | 归档脚本：超期目录筛选（`<名>_<YYYYMMDD>` 后缀日期/边界>30 天/非法日期跳过）、**7z 命令口径锚（-t7z -mx=9 -mfb=192 -ms=on -md=256m -snl -mmt -sdel）**、幂等跳过（同名 .7z 存在）、失败保留源、真实 7z 往返（skipUnless 本机有 7z，CI 无 7z 自动跳过） | -sdel 语义由 7z 保证（成功才删源）；压缩参数为用户指定口径，改动须经用户确认 |
-| `test_misc.py` | 日志 tee 自动落盘、**echo 开关单元锚（关闭后控制台静默、文件镜像含缓冲前缀不受影响，RUN-37）**、**实跑端到端静默锚（真跑控制台止于"运行日志: 路径"提示行，批次处理日志只进 run_<ts>.log）**、Logger(None) 控制台模式、`results/<批次>_<日期>` 命名、**run_date 启动时固定（跨 0 点锚）**、**全流程 dry-run success+零落盘锚**、**外送平铺布局端到端锚（RUN-36）**、**样本名白名单 P0 阻断锚（非常规字符→中断分析，DEC-19 v2.8.0；RUN-38 起消息点名中文）**、**批次名中文 P0 阻断锚（RUN-38：容器 locale 报错前置暴露）**、**.gitignore 拦截私密 bed 锚（RUN-38）**、**BedToIntervalList 参数锚（--UNIQUE true/--DROP_MISSING_CONTIGS true 双参缺一不可 + 产物齐备零命令幂等，RUN-40）**、**--version 锚**、**相对 --input 尊重 GWAS_RAW_DATA 覆盖锚（RUN-32 事故）**、**MultiQC 时序锚（裁决/重建之后、交付导出之前，v2.7.0 起锚定 step6 方法）**、交付导出（`Output/<批次>_<日期>` 命名、md5sum/MANIFEST/README/幂等 mtime、**MultiQC extra_files 布局与回退**）、**INDEX.md 累积锚（历史交付∪本次运行）** | 手动 shell 重定向曾被认为是必需（现 stdout 自动 tee 进运行日志）；实跑曾控制台照常外显致 nohup.out 堆积全量运行日志（RUN-37 关闭：止于日志路径提示行）；交付源未更新不得重拷；执行日期须取自启动时间戳一次性派生，否则跨午夜运行会写进两个日期目录；全流程 dry-run 曾因 gvcf.list 写入/merge 建目录/disk_usage 三处无守卫，仅同日实跑后可用、跨日直接 FileNotFoundError（RUN-27 修复）；MultiQC 时序为用户口径——全部流程结束 QC 齐全后才出最终报告再交付（RUN-27）；交付目录 v2.3.0 由 delivery 改名 Output 且 MultiQC 随交付；INDEX.md 曾整体重写只含本次运行批次，历史交付被挤出索引（RUN-29 修复）；bed 按 GRCh38 完整版（含 ALT contig）制定而比对参考字典无 → BedToIntervalList 曾 PicardException 中断，重叠探针曾虚增靶区碱基口径（RUN-40 修复：DEC-26 双参数） |
+| `test_misc.py` | 日志 tee 自动落盘、**echo 开关单元锚（关闭后控制台静默、文件镜像含缓冲前缀不受影响，RUN-37）**、**实跑端到端静默锚（真跑控制台止于"运行日志: 路径"提示行，批次处理日志只进 run_<ts>.log）**、Logger(None) 控制台模式、`results/<批次>_<日期>` 命名、**run_date 启动时固定（跨 0 点锚）**、**全流程 dry-run success+零落盘锚**、**外送平铺布局端到端锚（RUN-36）**、**样本名白名单 P0 阻断锚（非常规字符→中断分析，DEC-19 v2.8.0；RUN-38 起消息点名中文）**、**批次名中文 P0 阻断锚（RUN-38：容器 locale 报错前置暴露）**、**.gitignore 拦截私密 bed 锚（RUN-38）**、**BedToIntervalList 参数锚（--UNIQUE true/--DROP_MISSING_CONTIGS true 双参缺一不可 + awk 字典白名单过滤 + 产物齐备零命令幂等，RUN-40/42）**、**派生靶区新鲜度锚（源 bed mtime 更新→sorted.bed/interval_list 逐级重建，DEC-28）**、**HC -L interval_list 口径锚（DEC-28：bed 不得作 -L）**、**异常路径无 UnboundLocalError 锚（RUN-42：批次失败时 except 完整走完——曾读仅成功段赋值的局部 notify_on 二次崩，失败通知发不出）**、**--version 锚**、**相对 --input 尊重 GWAS_RAW_DATA 覆盖锚（RUN-32 事故）**、**MultiQC 时序锚（裁决/重建之后、交付导出之前，v2.7.0 起锚定 step6 方法）**、交付导出（`Output/<批次>_<日期>` 命名、md5sum/MANIFEST/README/幂等 mtime、**MultiQC extra_files 布局与回退**）、**INDEX.md 累积锚（历史交付∪本次运行）** | 手动 shell 重定向曾被认为是必需（现 stdout 自动 tee 进运行日志）；实跑曾控制台照常外显致 nohup.out 堆积全量运行日志（RUN-37 关闭：止于日志路径提示行——也正因此实跑报错只埋 run log，配 RUN-42 的失败通知才有兜底）；交付源未更新不得重拷；执行日期须取自启动时间戳一次性派生，否则跨午夜运行会写进两个日期目录；全流程 dry-run 曾因 gvcf.list 写入/merge 建目录/disk_usage 三处无守卫，仅同日实跑后可用、跨日直接 FileNotFoundError（RUN-27 修复）；MultiQC 时序为用户口径——全部流程结束 QC 齐全后才出最终报告再交付（RUN-27）；交付目录 v2.3.0 由 delivery 改名 Output 且 MultiQC 随交付；INDEX.md 曾整体重写只含本次运行批次，历史交付被挤出索引（RUN-29 修复）；bed 按 GRCh38 完整版（含 ALT contig）制定而比对参考字典无 → BedToIntervalList 曾 PicardException 中断（RUN-40：DEC-26 双参数）；HC -L 曾用含 ALT 的 bed 三样本全灭 + except 崩于未赋值 notify_on 致"无通知无报错"静默死亡（RUN-42：DEC-28——HC 改 interval_list、sorted.bed 按字典过滤、派生文件随源 mtime 重建） |
 
 ## 新服务器迁移后的建议验证顺序
 
-1. `./run_tests.sh` —— 131 用例全绿（验证 Python 版本兼容与全部纯逻辑）
+1. `./run_tests.sh` —— 134 用例全绿（验证 Python 版本兼容与全部纯逻辑）
 2. `cp .env.example .env`（pipeline/ 下）并填入钉钉地址 → `python3 run_pipeline.py --notify-test` —— 钉钉连通性（webhook/关键词，需能出网）
 3. `python3 run_pipeline.py --dry-run --batch <小批次>` —— 容器/参考文件/路径可用性与资源计划推导
 4. `python3 run_pipeline.py --resource-profile low --dry-run` —— 低配档口径（workers=1、sort 128M、GATK 1g）

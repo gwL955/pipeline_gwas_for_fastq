@@ -11,17 +11,60 @@ import config
 from runner import nonempty
 
 
-# ── interval_list 准备（targets.sorted.bed / interval_list 缺失时自动生成，幂等跳过） ──
+# ── interval_list 准备（DEC-26 参数 + DEC-28 字典过滤/新鲜度） ────────────
+def _dict_contigs(dict_path):
+    """genome.dict 的 SN 名集合（@SQ 行第二字段去 SN: 前缀）"""
+    try:
+        with open(dict_path, encoding="utf-8") as f:
+            return {ln.split("\t")[1][3:] for ln in f
+                    if ln.startswith("@SQ\t")}
+    except OSError:
+        return set()
+
+
+def _bed_contigs(bed_path):
+    try:
+        with open(bed_path, encoding="utf-8") as f:
+            return {ln.split("\t", 1)[0].strip() for ln in f
+                    if ln.strip() and not ln.startswith(("#", "track", "browser"))}
+    except OSError:
+        return set()
+
+
+def _derived_stale(out_path, src_path):
+    """派生靶区文件新鲜度（DEC-28）：缺失/空，或源文件 mtime 更新 → 需重建。
+    防"更新 targets.bed 但派生 sorted.bed/interval_list 非空被幂等跳过"的陈旧陷阱
+    （RUN-42：sorted.bed 符号链接含 ALT contig 行，HC -L 全军覆没）"""
+    if not nonempty(out_path):
+        return True
+    try:
+        return os.path.getmtime(out_path) < os.path.getmtime(src_path)
+    except OSError:
+        return True
+
+
 def prep_interval_list(runner, logger):
-    if not nonempty(config.TARGETS_SORTED_BED):
-        logger.info(f"生成 {config.TARGETS_SORTED_BED}（awk 前三列 + 版本排序去重）")
+    if _derived_stale(config.TARGETS_SORTED_BED, config.TARGETS_BED):
+        dropped = _bed_contigs(config.TARGETS_BED) - _dict_contigs(config.GENOME_DICT)
+        if dropped:
+            logger.warn("靶区 bed 含 genome.dict 外 contig，生成 sorted.bed 时过滤丢弃: "
+                        + ", ".join(sorted(dropped)))
+        logger.info(f"生成 {config.TARGETS_SORTED_BED}"
+                    "（awk 前三列 + genome.dict contig 过滤 + 版本排序去重）")
+        # outputs 不传 runner：陈旧但非空的派生文件会被 runner 自身幂等误跳过
+        # （DEC-28——新鲜度判断上收 prep；字典过滤在 awk 内做，dry-run 零落盘不变）
         rc = runner.run(
-            f"awk 'NF>=3{{print $1\"\\t\"$2\"\\t\"$3}}' {config.TARGETS_BED} "
+            f"awk 'NR==FNR && /^@SQ/ {{sub(/^SN:/, \"\", $2); c[$2]; next}} "
+            f"NR>FNR && NF>=3 && ($1 in c) {{print $1\"\\t\"$2\"\\t\"$3}}' "
+            f"{config.GENOME_DICT} {config.TARGETS_BED} "
             f"| sort -k1,1V -k2,2n -u > {config.TARGETS_SORTED_BED}",
-            logger=logger, outputs=[config.TARGETS_SORTED_BED])
+            logger=logger)
         if rc != 0:
             return False
-    if not nonempty(config.TARGETS_INTERVAL_LIST):
+        if not getattr(runner, "dry_run", False) and not nonempty(config.TARGETS_SORTED_BED):
+            logger.error(f"sorted.bed 生成后为空: {config.TARGETS_SORTED_BED}")
+            return False
+    if _derived_stale(config.TARGETS_INTERVAL_LIST, config.TARGETS_SORTED_BED):
         logger.info(f"生成 {config.TARGETS_INTERVAL_LIST}（BedToIntervalList -SD genome.dict，"
                     "--UNIQUE 去重合并 + --DROP_MISSING_CONTIGS 丢字典外 contig，DEC-26）")
         rc = runner.run(
@@ -31,7 +74,7 @@ def prep_interval_list(runner, logger):
                         f"-O {runner.cpath(config.TARGETS_INTERVAL_LIST)} "
                         f"-SD {runner.cpath(config.GENOME_DICT)} "
                         f"--UNIQUE true --DROP_MISSING_CONTIGS true"),
-            logger=logger, outputs=[config.TARGETS_INTERVAL_LIST])
+            logger=logger)
         if rc != 0:
             return False
     return True
@@ -123,6 +166,10 @@ def apply_bqsr(runner, markdup_bam, table, out_bam, gatk_mem, logger):
 
 # ── Step 5 变异检测 ──
 def haplotypecaller(runner, bqsr_bam, out_gvcf, gatk_mem, hmm_threads, logger):
+    """-L 用 interval_list 不用 sorted.bed（DEC-28）：GATK 引擎对 -L 区间 contig
+    严格校验字典，bed 含字典外 contig（如 ALT）即 USER ERROR 全体失败（RUN-42）；
+    interval_list 经 DEC-26 参数保证字典口径+唯一合并。bed 留给 bcftools/mosdepth
+    （二者容忍字典外 contig），且 sorted.bed 生成同样已按字典过滤。"""
     rc = runner.run(
         runner.tool("gatk",
                     f"gatk --java-options -Xmx{gatk_mem} HaplotypeCaller "
@@ -130,7 +177,7 @@ def haplotypecaller(runner, bqsr_bam, out_gvcf, gatk_mem, hmm_threads, logger):
                     f"-I {runner.cpath(bqsr_bam)} "
                     f"-O {runner.cpath(out_gvcf)} "
                     f"-ERC GVCF "
-                    f"-L {runner.cpath(config.TARGETS_SORTED_BED)} "
+                    f"-L {runner.cpath(config.TARGETS_INTERVAL_LIST)} "
                     f"--interval-padding {config.HC_INTERVAL_PADDING} "
                     f"--native-pair-hmm-threads {hmm_threads} "
                     f"-ploidy {config.PLOIDY}"),

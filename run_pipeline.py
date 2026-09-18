@@ -973,7 +973,6 @@ def process_batch(batch, batch_dir, args, plan, main_logger, run_date=""):
 
         # ── 汇总 ──
         merged, cohort_stats = ctx.merged, ctx.cohort_stats
-        notify_on = ctx.notify_on
         bdata["status"] = "failed" if ctx.failed and len(ctx.failed) >= len(merged) \
             else ("success" if not ctx.failed else "partial")
         bdata["failed_samples"] = dict(ctx.failed)
@@ -997,7 +996,7 @@ def process_batch(batch, batch_dir, args, plan, main_logger, run_date=""):
                                          os.path.join(work, "run_report.md"))
 
         # 成功通知
-        if notify_on:
+        if ctx.notify_on:
             _notify_result(batch, bdata, plan, log)
         log.step(f"═══ 批次 {batch} 结束: {bdata['status']}"
                  f"（{bdata['duration_s']}s）═══")
@@ -1007,7 +1006,10 @@ def process_batch(batch, batch_dir, args, plan, main_logger, run_date=""):
         log.error(f"批次 {batch} 失败: {e}")
         log.error(traceback.format_exc())
         bdata["duration_s"] = round(time.time() - ctx.started, 1)
-        if notify_on:
+        # ctx.notify_on 在进入 try 之前即已赋值——曾用局部 notify_on（仅全步骤
+        # 成功后的汇总段才赋值），step 中途抛异常即 UnboundLocalError：失败通知
+        # 发不出且异常炸穿 main()（RUN-42）
+        if ctx.notify_on:
             tail = log.tail(20).replace("`", "'")
             dingtalk.notify(
                 f"批次 {batch} 失败",
