@@ -314,6 +314,7 @@ class BatchCtx:
         lanes_merged = sum(len(si.r1) for sm, si in valid.items() if sm in self.merged)
         self.step_time("step0")
         _step_notify(self.notify_on, self.batch, 0, "清点与Lane合并", self.log,
+                     total_steps=self.args.step + 1,
                      samples=f"{len(self.merged)}/{n_initial} 成功 | Lane 合并 {lanes_merged}/{lanes_expected}",
                      metrics=f"输入 {_fmt_gb(input_bytes)} | md5 "
                              f"{'FAIL ' + str(len(md5_failed)) if md5_failed else 'OK'}"
@@ -390,7 +391,10 @@ class BatchCtx:
         self.step_time("step1")
         self.log.result(f"Step 1 完成: 成功 {len(self.merged) - len(self.failed)}/{len(self.merged)}")
         _step_notify(self.notify_on, self.batch, 1, "QC+修剪", self.log,
+                     total_steps=self.args.step + 1,
                      samples=f"{len(self.merged) - len(self.failed)}/{len(self.merged)} 成功",
+                     # fastp 保留率/Q30 均值保留含对照原口径（DEC-32：修剪口径对
+                     # 对照同样成立；reads 低已由 DEC-31 OK 提示行专属播报）
                      metrics=f"fastp 保留率 {_avg(self.metrics.get('fastp_retention'))}% | "
                              f"Q30 {_avg(self.metrics.get('q30_pct'))}%",
                      anomalies=_step_anoms(self, "step1")
@@ -452,9 +456,10 @@ class BatchCtx:
         self.step_time("step2")
         self.log.result(f"Step 2 完成: 成功 {len(self.merged) - len(self.failed)}/{len(self.merged)}")
         _step_notify(self.notify_on, self.batch, 2, "比对", self.log,
+                     total_steps=self.args.step + 1,
                      samples=f"{len(self.merged) - len(self.failed)}/{len(self.merged)} 成功",
-                     metrics=f"mapped {_avg(self.metrics.get('mapped_pct'))}% | "
-                             f"proper pair {_avg(self.metrics.get('pp_pct'))}%",
+                     metrics=f"mapped {_avg(self.metrics.get('mapped_pct'), self.excluded)}% | "
+                             f"proper pair {_avg(self.metrics.get('pp_pct'), self.excluded)}%",
                      anomalies=_step_anoms(self, "step2")
                                + alerts.check_flagstat(self.metrics.get("mapped_pct"),
                                                        self.metrics.get("pp_pct"),
@@ -513,10 +518,14 @@ class BatchCtx:
                 self.failed[sm] = f"step3 异常: {r}"
         self.step_time("step3")
         self.log.result(f"Step 3 完成: 成功 {len(self.merged) - len(self.failed)}/{len(self.merged)}")
+        # ELS 播报（DEC-32）：排除对照后的 均值/方差/最低值+样本——NTC reads 近 0，
+        # 其 ELS 无统计意义且必然占据最低值（误读为文库复杂度不足）
+        els_str = alerts.els_summary(self.metrics.get("els"), excluded=self.excluded)
         _step_notify(self.notify_on, self.batch, 3, "去重", self.log,
+                     total_steps=self.args.step + 1,
                      samples=f"{len(self.merged) - len(self.failed)}/{len(self.merged)} 成功",
-                     metrics=f"重复率 {_avg(self.metrics.get('dup_pct'))}% | "
-                             f"ELS 最小 {alerts._min_item(self.metrics.get('els'))[1]}",
+                     metrics=f"重复率 {_avg(self.metrics.get('dup_pct'), self.excluded)}% | "
+                             f"ELS {els_str if els_str else 'n/a'}",
                      anomalies=_step_anoms(self, "step3")
                                + alerts.check_dup(self.metrics.get("dup_pct"),
                                                   excluded=self.excluded),
@@ -578,6 +587,7 @@ class BatchCtx:
         n_bqsr_ok = len([sm for sm in self.merged if sm not in self.failed])
         self.log.result(f"Step 4 完成: 成功 {n_bqsr_ok}/{len(self.merged)}")
         _step_notify(self.notify_on, self.batch, 4, "BQSR校准", self.log,
+                     total_steps=self.args.step + 1,
                      samples=f"{n_bqsr_ok}/{len(self.merged)} 成功",
                      metrics="markdup↔BQSR flagstat 逐行一致断言 "
                              f"{n_bqsr_ok}/{n_bqsr_ok} 通过",
@@ -763,6 +773,7 @@ class BatchCtx:
                                     + " 为历史运行产物（断点续跑复用）"))
 
         _step_notify(self.notify_on, self.batch, 5, "变异检测", self.log,
+                     total_steps=self.args.step + 1,
                      samples=f"gVCF {len(hc_ok)}/{len(calling)} | 联合分型样本 {len(hc_ok)}",
                      metrics=f"raw {self.cohort_stats['raw'].get('records')} → PASS "
                              f"{self.cohort_stats['PASS'].get('records')} | "
@@ -931,11 +942,14 @@ class BatchCtx:
         ntc_depth = (self.metrics.get("mosdepth_mean") or {}).get("NTC") \
             if self.excluded else None
         _step_notify(self.notify_on, self.batch, 6, "质量汇总", self.log,
+                     total_steps=self.args.step + 1,
                      samples=f"{len(self.merged) - len(self.failed)}/{len(self.merged)} 成功 | "
                              f"裁决 {len(self.bdata.get('_adj_vcfs') or {})} 样本",
-                     metrics=f"mean depth {_avg(self.metrics.get('mean_target_coverage'))}× | "
-                             f"20X {_avg(self.metrics.get('pct_20x'))}% | "
-                             f"捕获效率(selected) {_avg(self.metrics.get('pct_selected'))}% | "
+                     # 均值排除对照（DEC-32）：NTC 深度近 0 会显著拉低批均值；
+                     # 其自身深度由行尾"NTC 深度"单独播报、污染由 TH-21 负责判定
+                     metrics=f"mean depth {_avg(self.metrics.get('mean_target_coverage'), self.excluded)}× | "
+                             f"20X {_avg(self.metrics.get('pct_20x'), self.excluded)}% | "
+                             f"捕获效率(selected) {_avg(self.metrics.get('pct_selected'), self.excluded)}% | "
                              f"call rate {call_rate}% | "
                              f"Ti/Tv PASS {self.cohort_stats.get('PASS', {}).get('titv')}"
                              + (f" | NTC 深度 {ntc_depth}×" if ntc_depth is not None else ""),
@@ -995,6 +1009,7 @@ def process_batch(batch, batch_dir, args, plan, main_logger, run_date=""):
         bdata["status"] = "failed" if ctx.failed and len(ctx.failed) >= len(merged) \
             else ("success" if not ctx.failed else "partial")
         bdata["failed_samples"] = dict(ctx.failed)
+        bdata["samples"]["excluded"] = sorted(ctx.excluded)   # 对照清单入 run_summary（DEC-32）
         m = dict(ctx.metrics)
         if cohort_stats:
             m.update({
@@ -1049,8 +1064,11 @@ def _pct(v):
     return f"{v * 100:.1f}%" if isinstance(v, (int, float)) else "?"
 
 
-def _avg(d):
-    vals = [v for v in (d or {}).values() if isinstance(v, (int, float))]
+def _avg(d, excluded=()):
+    """指标播报批均值：剔除对照样本（v2.22.0/DEC-32——DEC-31 只豁免了告警点名，
+    "指标:"行均值此前仍含 NTC，其 reads 近 0 使 dup/深度/mapped 等均值失真）"""
+    vals = [v for sm, v in (d or {}).items()
+            if isinstance(v, (int, float)) and sm not in excluded]
     return round(sum(vals) / len(vals), 2) if vals else None
 
 
@@ -1164,11 +1182,13 @@ def _step_anoms(ctx, step_prefix):
             for sm, reason in ctx.failed.items() if reason.startswith(step_prefix)]
 
 
-def _step_notify(notify_on, batch, step_no, name, log, **kw):
-    """步骤里程碑通知。DINGTALK_MILESTONES=0 时只发异常级（P0/P1），OK 级静默。"""
+def _step_notify(notify_on, batch, step_no, name, log, total_steps=None, **kw):
+    """步骤里程碑通知。total_steps=本次实跑步数（标题"（共 X 步）"，DEC-32）；
+    DINGTALK_MILESTONES=0 时只发异常级（P0/P1），OK 级静默。"""
     if not notify_on:
         return
-    title, text = alerts.step_milestone(batch, step_no, name, **kw)
+    title, text = alerts.step_milestone(batch, step_no, name,
+                                        total_steps=total_steps, **kw)
     level = alerts.worst_level(kw.get("anomalies"))
     if not config.DINGTALK_MILESTONES and level == "OK":
         return
@@ -1177,6 +1197,9 @@ def _step_notify(notify_on, batch, step_no, name, log, **kw):
 
 def _notify_result(batch, bdata, plan, log):
     m = bdata.get("metrics", {})
+    # 质量均值行排除对照（DEC-32）：mapped/dup/20X 等样本级指标对 NTC 无统计
+    # 意义（reads 近 0 拉低批均值）；保留率含对照影响可忽略但同口径一并排除
+    excluded = set(bdata.get("samples", {}).get("excluded") or ())
     final_anoms = []
     if bdata.get("failed_samples"):
         final_anoms += [("P1", f"{len(bdata['failed_samples'])} 个样本失败: "
@@ -1192,9 +1215,9 @@ def _notify_result(batch, bdata, plan, log):
         f"联合分型 {len(bdata['samples'].get('calling') or [])}"
         f"\n\n指标: 总耗时 {int(hh)}h{int(mm)}m{int(ss)}s｜"
         f"workers {plan.workers}×{plan.threads}"
-        f"\n\n质量: fastp 保留率 {_avg(m.get('fastp_retention'))}%｜"
-        f"mapped {_avg(m.get('mapped_pct'))}%｜dup {_avg(m.get('dup_pct'))}%｜"
-        f"20X {_avg(m.get('pct_20x'))}%"
+        f"\n\n质量: fastp 保留率 {_avg(m.get('fastp_retention'), excluded)}%｜"
+        f"mapped {_avg(m.get('mapped_pct'), excluded)}%｜dup {_avg(m.get('dup_pct'), excluded)}%｜"
+        f"20X {_avg(m.get('pct_20x'), excluded)}%"
         f"\n\n变异: raw→PASS SNP {m.get('snp_raw')}→{m.get('snp_pass')}｜"
         f"INDEL {m.get('indel_raw')}→{m.get('indel_pass')}｜"
         f"Ti/Tv {m.get('titv_raw')}→{m.get('titv_pass')}")

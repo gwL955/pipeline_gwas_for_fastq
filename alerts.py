@@ -23,12 +23,19 @@ OK：全部正常，仅常规里程碑播报
 check_ntc_reads（占批次中位比例）专属口径负责。
 
 消息模板（钉钉 markdown 官方子集：标题/引用/加粗/列表）：
-    [GWAS][P1] 20260720批次 · Step 2 比对完成
+    [GWAS][P1] 20260720批次 · Step 2 比对完成（共 7 步）
     样本: 4/4 成功 | Lane 合并 16/16
     指标: mapped 98.7% | proper pair 94.2%
     异常: L20260615001 mapped 91.3%（阈值 95%）← 需确认
     产物: bam/*/*.sort.bam ×4  mtime 2026-09-14 15:22
     日志: tail -f logs/sample_L20260615001.log
+
+指标播报对照豁免（v2.22.0/DEC-32）：DEC-31 只豁免了"告警点名"，"指标:"行的
+批均值与 Step3 ELS 统计此前仍含对照——NTC reads 近 0 使 dup/ELS/深度/mapped
+均值失真、ELS 最低值被 NTC 占据（误读为文库复杂度不足）。v2.22.0 起里程碑与
+全流程汇总的样本级指标均值、ELS 统计一律排除 excluded 对照（Step1 里程碑的
+fastp 保留率/Q30 均值保留原口径：修剪口径对对照同样成立，reads 已由 DEC-31
+OK 提示行播报）。
 """
 
 import glob
@@ -58,11 +65,19 @@ def _avg(d):
     return round(sum(vals) / len(vals), 1) if vals else None
 
 
-def _min_item(d):
-    """→ (样本, 最小值)。仅用于指标播报（如 Step3 ELS 最小值）；
-    告警点名不走本函数（全点名见 _violating，DEC-30）"""
-    vals = [(k, v) for k, v in (d or {}).items() if isinstance(v, (int, float))]
-    return min(vals, key=lambda x: x[1]) if vals else (None, None)
+def els_summary(els, excluded=()):
+    """ELS 播报串（v2.22.0/DEC-32）："均值 … · 方差 … · 最低 <样本> …"
+    （科学计数法）——排除对照样本：NTC reads 近 0，其 ELS 无统计意义且必然
+    占据最低值（误读为文库复杂度不足）。方差取总体方差（除以 n，与
+    check_depth_cv 同口径）；无有效数值返回 None"""
+    vals = [(sm, v) for sm, v in (els or {}).items()
+            if isinstance(v, (int, float)) and sm not in excluded]
+    if not vals:
+        return None
+    mean = sum(v for _, v in vals) / len(vals)
+    var = sum((v - mean) ** 2 for _, v in vals) / len(vals)
+    lo_sm, lo_v = min(vals, key=lambda x: x[1])
+    return f"均值 {mean:.2e} · 方差 {var:.2e} · 最低 {lo_sm} {lo_v:.2e}"
 
 
 def _violating(d, threshold, below=True):
@@ -223,11 +238,16 @@ def artifact_summary(pattern, basedir=None):
 
 # ── 里程碑消息构造 ──────────────────────────────────────────────────────
 def step_milestone(batch, step_no, step_name, *, samples="", metrics="",
-                   anomalies=(), artifacts="", log_hint="", extra=()):
-    """→ (title, text)。title 带 [GWAS][P级别]，正文含小写 gwas 兜底由 dingtalk 补。"""
+                   anomalies=(), artifacts="", log_hint="", extra=(),
+                   total_steps=None):
+    """→ (title, text)。title 带 [GWAS][P级别]；total_steps 给定时标题尾部
+    追加"（共 X 步）"（X=本次实跑步数 0..--step，v2.22.0/DEC-32——里程碑单条
+    收到时不知全流程还有几步）；正文含小写 gwas 兜底由 dingtalk 补。"""
     level = worst_level(anomalies)
     title = f"[GWAS][{level}] {batch}批次 · " \
             f"{f'Step {step_no} ' if step_no is not None else ''}{step_name}完成"
+    if step_no is not None and total_steps:
+        title += f"（共 {total_steps} 步）"
     text = f"#### {title}"
     if samples:
         text += f"\n\n样本: {samples}"

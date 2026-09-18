@@ -211,6 +211,49 @@ class TestControlExemption(unittest.TestCase):
         self.assertEqual(alerts.check_depth_cv({"NTC": 0.5, "A": 100.0, "B": 102.0})[0][0],
                          "P2")
 
+class TestElsSummary(unittest.TestCase):
+    """★ RUN-46/DEC-32：Step3 ELS 播报排除对照并扩为 均值/方差/最低值+样本——
+    NTC reads 近 0，其 ELS 无统计意义且必然占据最低值（曾误读为文库复杂度不足）"""
+
+    def test_control_excluded_from_els_stats(self):
+        # 不排除：NTC(3) 占据最低且拉低均值（旧误判形态）；排除后恢复实验样本口径
+        els = {"TG017": 8305698, "TG018": 9100000, "TG019": 8500000, "NTC": 3}
+        with_ctl = alerts.els_summary(els)
+        self.assertIn("NTC", with_ctl)
+        s = alerts.els_summary(els, excluded={"NTC"})
+        self.assertNotIn("NTC", s)
+        self.assertIn("均值", s)
+        self.assertIn("方差", s)
+        self.assertIn("最低 TG017", s)               # 最低值带对应样本名
+        self.assertIn("8.31e+06", s)                 # TG017 最低值本体
+
+    def test_els_population_variance(self):
+        # 方差=总体方差（÷n，与 check_depth_cv 同口径）：{100,200} → 均值150、方差2500
+        s = alerts.els_summary({"A": 100, "B": 200})
+        self.assertIn("1.50e+02", s)
+        self.assertIn("2.50e+03", s)
+        self.assertIn("最低 A", s)
+
+    def test_els_no_valid_values(self):
+        # 空/全对照/非数值（None 是 GATK "?" 的解析产物）→ None（调用方显示 n/a）
+        self.assertIsNone(alerts.els_summary(None))
+        self.assertIsNone(alerts.els_summary({}))
+        self.assertIsNone(alerts.els_summary({"NTC": 3}, excluded={"NTC"}))
+        self.assertIsNone(alerts.els_summary({"A": None, "B": "?"}))
+
+
+class TestBroadcastExemption(unittest.TestCase):
+    """★ RUN-46/DEC-32：指标播报均值排除对照（run_pipeline._avg）——DEC-31 只
+    豁免了告警点名，"指标:"行均值此前仍含 NTC（mapped/深度等被 reads 近 0 拉低）"""
+
+    def test_avg_excludes_control(self):
+        import run_pipeline
+        d = {"A": 98.0, "B": 99.0, "NTC": 2.0}
+        self.assertEqual(run_pipeline._avg(d), round((98.0 + 99.0 + 2.0) / 3, 2))
+        self.assertEqual(run_pipeline._avg(d, {"NTC"}), 98.5)
+        self.assertIsNone(run_pipeline._avg({}, {"NTC"}))
+
+
 class TestMilestone(unittest.TestCase):
 
     def test_template_fields(self):
@@ -226,6 +269,15 @@ class TestMilestone(unittest.TestCase):
                    "异常: [P1] L20260615001", "← 需确认",
                    "产物: bam/*/*.sort.bam ×4", "日志: tail -f"):
             self.assertIn(kw, text)
+
+    def test_total_steps_in_title(self):
+        """★ RUN-46/DEC-32：里程碑标题增"（共 X 步）"（X=本次实跑步数）；
+        不传 total_steps 保持旧标题（兼容）"""
+        title, text = alerts.step_milestone("260918", 3, "去重", total_steps=7)
+        self.assertEqual(title, "[GWAS][OK] 260918批次 · Step 3 去重完成（共 7 步）")
+        self.assertIn("#### [GWAS][OK] 260918批次 · Step 3 去重完成（共 7 步）", text)
+        t_no, _ = alerts.step_milestone("260918", 3, "去重")
+        self.assertEqual(t_no, "[GWAS][OK] 260918批次 · Step 3 去重完成")
 
     def test_level_in_title(self):
         _, text_p0 = alerts.step_milestone("B", 6, "质量汇总",
