@@ -313,6 +313,7 @@ zip 超钉钉 20MB 上限时只发说明消息（提示到服务器 Output/ 取�
 | 9 | 笔记 CollectHsMetrics 先用 markdup.bam（3-9）后用 BQSR bam（5-5） | 统一用 BQSR bam（5-5/Step 6 口径） | mosdepth 双跑（md+bqsr）保留对照 |
 | 10 | 笔记输出至工作区根部（qc/ bam/ gvcf/ …） | 全部收进 `results/<批次>_<执行日期>/` | 批次隔离与安全边界要求 |
 | 11 | 笔记散述 HsMetrics/捕获口径 | on-target P1 阈值取 8%（panel 正常 8-10%） | PCT_SELECTED(25-28%)/on-bait 不得误作 on-target |
+| 12 | 笔记 BedToIntervalList 无 `--UNIQUE`/`--DROP_MISSING_CONTIGS` | 固定 `--UNIQUE true --DROP_MISSING_CONTIGS true`（DEC-26） | 新 panel bed 含字典外 ALT contig（否则 PicardException 中断）；重叠/相邻探针区间合并为唯一区间，靶区碱基按唯一口径（实测 31310→18339bp） |
 
 其余分析学内容（命令、参数语义、阈值：fastp length_required 36、bwa `-K 100000000 -Y`、
 HC interval-padding 100、硬过滤 QD2/QUAL30/SOR3/FS60/MQ40/MQRankSum/ReadPosRankSum 与

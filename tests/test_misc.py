@@ -528,5 +528,63 @@ class TestDeliveryIndex(unittest.TestCase):
                 self.assertIn(b, body)          # 历史 + 本次全部在索引中
 
 
+class TestIntervalListPrep(unittest.TestCase):
+    """★ BedToIntervalList 参数锚（RUN-40，DEC-26）：--UNIQUE true 去重合并 +
+    --DROP_MISSING_CONTIGS true 丢字典外 contig——新 panel bed 按 GRCh38 完整版
+    （含 ALT contig）制定，genome.dict（194 序列无 ALT）遇 `chr22_KI270879v1_alt`
+    即 PicardException 中断；重叠/相邻探针区间须合并为唯一区间（靶区碱基唯一口径）"""
+
+    def _prep(self, td, sorted_exists=False, interval_exists=False):
+        from modules import gatk as mgatk
+        bed = os.path.join(td, "targets.bed")
+        open(bed, "wb").write(b"chr1\t100\t200\n")
+        sorted_bed = os.path.join(td, "targets.sorted.bed")
+        ilist = os.path.join(td, "targets.sorted.interval_list")
+        if sorted_exists:
+            open(sorted_bed, "wb").write(b"chr1\t100\t200\n")
+        if interval_exists:
+            open(ilist, "wb").write(b"@HD\tVN:1.6\n")
+        cmds = []
+
+        class R:
+            def run(self, cmd, logger=None, outputs=(), timeout=None, capture=False):
+                cmds.append(cmd)
+                return 0
+
+            def tool(self, sif_key, args, binds=None):
+                return f"singularity:{sif_key} {args}"
+
+            def cpath(self, path):
+                return path
+
+        with mock.patch.object(config, "TARGETS_BED", bed), \
+                mock.patch.object(config, "TARGETS_SORTED_BED", sorted_bed), \
+                mock.patch.object(config, "TARGETS_INTERVAL_LIST", ilist), \
+                mock.patch.object(config, "GENOME_DICT", os.path.join(td, "genome.dict")):
+            ok = mgatk.prep_interval_list(R(), _FakeLog())
+        return ok, cmds
+
+    def test_bedtointervallist_flags(self):
+        """两参数必须同时在命令行上：漏 --DROP_MISSING_CONTIGS 遇 ALT contig 必中断；
+        漏 --UNIQUE 重叠探针虚增靶区碱基（HsMetrics 口径失真）"""
+        with tempfile.TemporaryDirectory() as td:
+            ok, cmds = self._prep(td)
+            self.assertTrue(ok)
+            self.assertEqual(len(cmds), 2)          # awk 排序去重 + BedToIntervalList
+            self.assertIn("sort -k1,1V -k2,2n -u", cmds[0])   # bed 级去完全重复行
+            gatk_cmd = cmds[1]
+            self.assertIn("BedToIntervalList", gatk_cmd)
+            self.assertIn("--UNIQUE true", gatk_cmd)
+            self.assertIn("--DROP_MISSING_CONTIGS true", gatk_cmd)
+            self.assertIn("-SD", gatk_cmd)
+
+    def test_interval_list_idempotent_skip(self):
+        """sorted.bed 与 interval_list 均已存在（非空）→ 零命令直接放行（REQ-04 幂等）"""
+        with tempfile.TemporaryDirectory() as td:
+            ok, cmds = self._prep(td, sorted_exists=True, interval_exists=True)
+            self.assertTrue(ok)
+            self.assertEqual(cmds, [])
+
+
 if __name__ == "__main__":
     unittest.main()

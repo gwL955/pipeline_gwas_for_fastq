@@ -22,13 +22,15 @@ def prep_interval_list(runner, logger):
         if rc != 0:
             return False
     if not nonempty(config.TARGETS_INTERVAL_LIST):
-        logger.info(f"生成 {config.TARGETS_INTERVAL_LIST}（BedToIntervalList -SD genome.dict）")
+        logger.info(f"生成 {config.TARGETS_INTERVAL_LIST}（BedToIntervalList -SD genome.dict，"
+                    "--UNIQUE 去重合并 + --DROP_MISSING_CONTIGS 丢字典外 contig，DEC-26）")
         rc = runner.run(
             runner.tool("gatk",
                         f"gatk --java-options -Xmx2g BedToIntervalList "
                         f"-I {runner.cpath(config.TARGETS_SORTED_BED)} "
                         f"-O {runner.cpath(config.TARGETS_INTERVAL_LIST)} "
-                        f"-SD {runner.cpath(config.GENOME_DICT)}"),
+                        f"-SD {runner.cpath(config.GENOME_DICT)} "
+                        f"--UNIQUE true --DROP_MISSING_CONTIGS true"),
             logger=logger, outputs=[config.TARGETS_INTERVAL_LIST])
         if rc != 0:
             return False

@@ -3,7 +3,7 @@
 ```yaml
 # ---- design-meta（机器可解析锚点，勿手改格式；版本规则见 §0）----
 doc: GWAS-pipeline-design
-version: 2.15.0
+version: 2.16.0
 updated: 2026-09-18
 owner_human: gewenlong
 owner_machine: ZCode(GLM)
@@ -122,7 +122,7 @@ sorted.bed/interval_list 与 bed 同目录生成）、
 | **2 比对** | `bwa-mem2 mem -K 100000000 -Y -R '@RG…SM:样本' | samtools sort -@T -m SORT_MEM`（管道流式）→ `samtools index` → flagstat/stats | `bam/<样本>/<样本>.sort.bam(+.bai)`〔sort.bam+.bai〕、`qc/flagstat|stats`〔对应文件〕 | P1：mapped<90 QC 口径（TH-05，报错不中断）；P2：mapped<95/pp<85（TH-06/07） |
 | **3 去重** | `gatk MarkDuplicates` → markdup.bam + metrics → flagstat/stats（去重前 duplicates 行不采集） | `bam/<样本>/<样本>.markdup.bam`〔markdup.bam+metrics〕 | P2：dup>30%（TH-09） |
 | **4 BQSR** | `gatk BaseRecalibrator`（dbsnp+Mills）→ recal.table → `ApplyBQSR` → **BQSR 前后 flagstat 逐行一致断言**（不一致该样本失败隔离） | `bam/<样本>/<样本>.recal.table`、`<样本>.markdup.BQSR.bam`〔BQSR bam+table〕 | P2：recal M 事件观测数<1e5（TH-36，校准不可信） |
-| **5 变异检测** | BedToIntervalList 准备 → 每样本 `gatk HaplotypeCaller -ERC GVCF`（靶区±100bp，样本级并行）→ gvcf.list（sorted，DEC-05）→ 批次内 `CombineGVCFs→GenotypeGVCFs`（串行）→ `bcftools norm -m -any` → SelectVariants SNP/INDEL → VariantFiltration 硬过滤（SNP：QD2/QUAL30/SOR3/FS60/MQ40/MQRankSum/ReadPosRankSum；INDEL：QD2/QUAL30/SOR10/FS200/ReadPosRankSum）→ concat → **FILTER 列出现 `.` 判错** → PASS 提取 → 双口径矩阵导出（`query -R`）+ 每样本 hardfiltered/PASS 拆分（`view -s`） | `gvcf/<样本>.g.vcf.gz`、`cohort/cohort.{raw→split→snp/indel→hardfiltered→PASS}.vcf.gz`、`matrix/genotype_matrix.tsv`、`matrix/genotype_detail_PASS.tsv`、`per_sample_vcf/<样本>.{hardfiltered,PASS}.vcf.gz` | cohort 级失败 raise 中断批次；P2：对账·数量（矩阵行数 vs `view -R` 计数，DEC-11 同口径）、对账·新鲜度（关键 VCF mtime<启动） |
+| **5 变异检测** | BedToIntervalList 准备（`--UNIQUE true` 重叠/相邻区间去重合并 + `--DROP_MISSING_CONTIGS true` 丢字典外 contig，DEC-26） → 每样本 `gatk HaplotypeCaller -ERC GVCF`（靶区±100bp，样本级并行）→ gvcf.list（sorted，DEC-05）→ 批次内 `CombineGVCFs→GenotypeGVCFs`（串行）→ `bcftools norm -m -any` → SelectVariants SNP/INDEL → VariantFiltration 硬过滤（SNP：QD2/QUAL30/SOR3/FS60/MQ40/MQRankSum/ReadPosRankSum；INDEL：QD2/QUAL30/SOR10/FS200/ReadPosRankSum）→ concat → **FILTER 列出现 `.` 判错** → PASS 提取 → 双口径矩阵导出（`query -R`）+ 每样本 hardfiltered/PASS 拆分（`view -s`） | `gvcf/<样本>.g.vcf.gz`、`cohort/cohort.{raw→split→snp/indel→hardfiltered→PASS}.vcf.gz`、`matrix/genotype_matrix.tsv`、`matrix/genotype_detail_PASS.tsv`、`per_sample_vcf/<样本>.{hardfiltered,PASS}.vcf.gz` | cohort 级失败 raise 中断批次；P2：对账·数量（矩阵行数 vs `view -R` 计数，DEC-11 同口径）、对账·新鲜度（关键 VCF mtime<启动） |
 | **6 汇总与交付** | mosdepth×2（markdup/BQSR bam）→ `CollectHsMetrics`（BQSR bam）→ **矩阵 `./.` 裁决**（mosdepth bqsr regions 深度 DP≥TH-15 改判 0/0）→ 每样本 PASS VCF 重建（`view -s` + GT 替换，其余字段原样）→ **MultiQC 最终报告（此时全部流程结束、QC 齐全）** → 交付导出 Output/ | `qc/mosdepth|hs metrics|multiqc`、`matrix/genotype_matrix.adjudicated.tsv`、`per_sample_vcf/<样本>.PASS.adjudicated.vcf.gz(+.tbi)`、`Output/<批次>_<日期>/` 全套 | P1：PASS 裁决 VCF 0 记录（交付为空）、NTC 靶深>10×（TH-21）；P2：on-target<8/depth<50/20X<95/Ti-Tv<2.0/call rate<95（TH-14/11/13/22/23）、批次深度 CV>0.5（TH-35） |
 | 每步之后 | `disk_guard`：Step 间磁盘复查 | — | P0：剩余<DISK_MIN_FREE_GB 立即终止批次（TH-24） |
 
@@ -156,6 +156,7 @@ cohort 级与 MultiQC 串行。样本失败即隔离（记入 failed，退出后
 | DEC-23 | **输入布局识别器独立函数化**：每式布局一个 `scan_*` 函数（统一签名 `flat, subdirs → {样本: SampleInfo}`）登记于 `LAYOUT_SCANNERS` 依序应用——先认者优先、同名冲突记无效、不匹配任何布局的文件忽略；新增输入格式只追加函数不改 `scan_batch` 主体。v2.12.0 起三种布局：Illumina 平铺（样本名=去 `_S#_L###_R[12]_001` 尾）、外送子目录（样本名=子目录名）、**外送平铺（样本名=去 `_R[12]` 尾，RUN-36 新增）** | 外送交付常直接平铺于批次目录，此前两种识别器都不认 → 整批"无有效样本"静默跳过且无原因可查（RUN-36 事故）；识别器与 Illumina 式整名锚定互斥（结尾 `_R#.fastq.gz` 与 `_001.fastq.gz` 不可能兼得） |
 | DEC-24 | **钉钉通知企业机器人化 + 交付文件推送（v2.15.0）**：webhook 机器人不能发文件，切换为企业内部应用机器人（v1.0 `groupMessages/send` + oapi `media/upload`，参考实现 dingtalk_test/dingtalk_bot.py）。凭证四键入 .env（CLIENT_ID/SECRET/ROBOT_CODE/CONVERSATION_ID），未配置降级语义不变；**交付推送：批次全部结束后**（多批次不逐批推，防通知淹没）逐成功批次把 `Output/<批次>_<日期>/` 打包临时 zip → 说明消息 + sampleFile 文件卡片 → 清理；zip 硬限制 ≤20MB/后缀白名单（超限只发说明消息提示到服务器取）；`--notify-test` 增加 markdown+文件双链路验证；发送失败只降级 WARN 不影响退出码 | 用户更换企业机器人并要求交付文件推送钉钉（RUN-39）；文件卡片白名单不含 vcf/html → 必须打包 zip |
 | DEC-25 | **results/ 归档脚本（archive_results.py）**：扫描 `<批次>_<YYYYMMDD>` 目录，执行日期距今超 `--days`（默认 30）→ `7z a -t7z -mx=9 -mfb=192 -ms=on -md=256m -snl -mmt -sdel <dest.7z> <src>`（用户指定口径；-sdel=压缩成功后删源，失败自动保留）；输出 `GWAS_ARCHIVE_DIR`（默认 `$WORK/archive/`）；幂等（同名 .7z 已存在跳过）；`--dry-run` 只列不动；非批次命名目录跳过；离线维护工具，不属于流程运行时 | results/ 批次目录无限累积占盘（RUN-39 用户要求）；-sdel 把"删源"安全性交给 7z 自身语义 |
+| DEC-26 | **interval_list 生成参数收紧（v2.16.0）**：BedToIntervalList 固定 `--UNIQUE true --DROP_MISSING_CONTIGS true`——UNIQUE 把重叠/相邻区间合并为唯一区间（sorted.bed 的 `sort -u` 只去完全重复行，探针重叠需靠 UNIQUE 摊平；HsMetrics 靶区按唯一口径计深度，不因重叠虚增碱基数）；DROP_MISSING_CONTIGS 丢弃 bed 中序列字典（genome.dict，194 序列、无 ALT）不存在的 contig 而非 PicardException 中断 | 新 panel bed 按 GRCh38 完整版（含 ALT，如 chr22_KI270879v1_alt）制定，与比对参考不一致，首跑即 `Sequence not found` 中断（RUN-40）；实测重叠探针致靶区虚标 31310bp，唯一口径实为 18339bp |
 
 ## 5. 统一口径与阈值总表（TH = config.py 镜像）<!-- HUMAN 可改值；MACHINE 同步 config 后过校验 -->
 
@@ -351,14 +352,14 @@ results/260422_20260914/                     Output/260422_20260914/
 | test_variant_post.py | 矩阵 `./.` 裁决、重建只换 GT、GT 列显式映射、norm outputs 口径 |
 | test_archive.py | 归档脚本：超期目录筛选（名后缀日期/边界>30 天/非法日期跳过）、7z 命令口径锚（8 参数含 -sdel）、幂等跳过、失败保留源、真实 7z 往返（skipUnless 本机有 7z） |
 | test_envfile.py | .env 解析语法、三源优先级、webhook 默认空、防回潮锚（源码无 access_token=）、降级、**靶区 bed 改址锚（GWAS_TARGETS_BED 只指 bed 本体、派生文件随同目录，RUN-38）** |
-| test_misc.py | tee 自动落盘、**实跑静默锚（控制台止于日志路径提示行，处理日志只进 run_<ts>.log，RUN-37）**、目录命名、跨午夜锚、全流程 dry-run success+零落盘锚、**样本名 P0 阻断锚（含中文点名，RUN-38）**、**批次名中文 P0 阻断锚（RUN-38）**、**.gitignore 拦截私密 bed 锚（RUN-38）**、--input 覆盖锚、--version、MultiQC 时序锚（step6 方法）、交付导出（Output 命名/md5sum/MANIFEST/MultiQC extra/幂等）、INDEX 累积锚、disk_guard、外送平铺布局端到端锚（RUN-36） |
+| test_misc.py | tee 自动落盘、**实跑静默锚（控制台止于日志路径提示行，处理日志只进 run_<ts>.log，RUN-37）**、目录命名、跨午夜锚、全流程 dry-run success+零落盘锚、**样本名 P0 阻断锚（含中文点名，RUN-38）**、**批次名中文 P0 阻断锚（RUN-38）**、**.gitignore 拦截私密 bed 锚（RUN-38）**、**BedToIntervalList 参数锚（--UNIQUE/--DROP_MISSING_CONTIGS + 幂等跳过，RUN-40）**、--input 覆盖锚、--version、MultiQC 时序锚（step6 方法）、交付导出（Output 命名/md5sum/MANIFEST/MultiQC extra/幂等）、INDEX 累积锚、disk_guard、外送平铺布局端到端锚（RUN-36） |
 
 `./run_tests.sh` = unittest 全量 + `check_design.py`（TH↔config + 版本双源）；
 CI（.github/workflows/ci.yml）在 py3.10/3.12 矩阵执行。
 
 ### 9.2 迁移/重建验证顺序（DEC-12）
 
-1. `./run_tests.sh` 全绿（全部用例数见 §9.1 各文件，当前共 128）
+1. `./run_tests.sh` 全绿（全部用例数见 §9.1 各文件，当前共 130）
 2. `cp .env.example .env` 填 webhook → `python3 run_pipeline.py --notify-test`（连通性）
 3. `python3 run_pipeline.py --dry-run --batch <小批次>`（容器/参考文件/路径与资源计划）
 4. `python3 run_pipeline.py --resource-profile low --dry-run`（低配档口径）
@@ -366,7 +367,7 @@ CI（.github/workflows/ci.yml）在 py3.10/3.12 矩阵执行。
 
 ### 9.3 重建完成判据
 
-128 用例 + check_design 全绿；`--version` 输出与本文档 version 一致；dry-run 零落盘；
+130 用例 + check_design 全绿；`--version` 输出与本文档 version 一致；dry-run 零落盘；
 单批次实跑 success 且 Step 6 交付目录含 VCF+tbi+MultiQC，`md5sum -c` 全过。
 
 ## 10. 变更日志（CHANGELOG）<!-- 人机共写：每方改动各记一行 -->
@@ -411,6 +412,8 @@ CI（.github/workflows/ci.yml）在 py3.10/3.12 矩阵执行。
 | 2.14.0 | 2026-09-18 | 机 | DEC-19 扩到批次名（NAME_RE 白名单共用，P0 消息点名中文/容器不支持）；新增 GWAS_TARGETS_BED 键（默认 $WORK/reference/targets.bed，派生 sorted.bed/interval_list 随 bed 同目录）；.gitignore 拦 *.bed/*.interval_list；.env/.env.example 登记；测试 111→115（批次名中文 P0 E2E/bed 改址/gitignore 锚）；RUN-38 |
 | 2.15.0 | 2026-09-18 | 人 | 钉钉换企业内部机器人（webhook 机器人不能发文件）：批次分析完成后将 Output 交付目录打包 zip 发钉钉（多批次全部分析完再统一发送，防通知淹没）；新增 results/ 归档脚本（超 30 天批次目录按指定 7z 参数打包，-sdel 删源）；参考实现 dingtalk_test/ |
 | 2.15.0 | 2026-09-18 | 机 | DEC-24：dingtalk.py 重写（v1.0 群消息+oapi 媒体上传+token 缓存+文件卡片；凭证四键入 .env；notify/send_markdown 语义与降级不变）；run_pipeline 批次循环后逐 success 批次 send_zip_dir；--notify-test 加文件链路；DEC-25：archive_results.py（--days/--results/--out/--dry-run，幂等）；测试 115→128（企业链路 mock/归档四件套）；RUN-39（--notify-test 实发成功、真实交付 zip 3.8MB→1.7MB 推送成功、归档实测 -sdel 删源+幂等） |
+| 2.16.0 | 2026-09-18 | 人 | 更新靶区 bed 后 BedToIntervalList 中断（bed 按 GRCh38 完整版制定含 ALT contig，比对参考字典无）→ 丢字典外 contig；bed 含重叠/重复探针区间 → interval_list 去重合并，靶区按唯一口径计碱基 |
+| 2.16.0 | 2026-09-18 | 机 | DEC-26：BedToIntervalList 固定 --UNIQUE true --DROP_MISSING_CONTIGS true（sorted.bed 的 sort -u 只去完全重复行，相邻/重叠区间靠 UNIQUE 合并）；README §8 差异表增第 12 行；测试 128→130（参数锚+幂等跳过锚）；RUN-40（真实容器实测：12014 行 bed → 11972 唯一区间/18339bp，丢弃 4 个 ALT 1bp 区间） |
 
 ## 11. 证据索引 <!-- MACHINE -->
 
@@ -419,7 +422,7 @@ CI（.github/workflows/ci.yml）在 py3.10/3.12 矩阵执行。
 | 运行台账（每轮） | pipeline/design_doc/RUN_HISTORY.md |
 | 验收运行（0_raw_data_test） | results/260422_20260914/、results/260422_20260916/ 等（运行日志在各批次 logs/） |
 | 交付 | Output/<批次>_<日期>/ + INDEX.md（累积） |
-| 测试集与 CI | pipeline/tests/（128 用例）+ run_tests.sh + .github/workflows/ci.yml |
+| 测试集与 CI | pipeline/tests/（130 用例）+ run_tests.sh + .github/workflows/ci.yml |
 | 使用说明/与笔记差异 | pipeline/README.md |
 | 环境参数 | pipeline/.env（密钥，600）+ pipeline/.env.example（模板） |
 | 命令参考快照 | pipeline/design_doc/notes_code_reference.md |
