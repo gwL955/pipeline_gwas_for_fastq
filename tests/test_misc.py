@@ -775,14 +775,21 @@ class TestCohortRerunGuard(unittest.TestCase):
 
     def _mk(self, td):
         work = os.path.join(td, "results", "B_20990909")
-        for d in ("cohort", "matrix", "per_sample_vcf"):
-            os.makedirs(os.path.join(work, d))
+        for d in ("cohort", "matrix", "per_sample_vcf",
+                  "qc" + os.sep + "bcftools_stats", "qc" + os.sep + "multiqc"):
+            os.makedirs(os.path.join(work, *d.split(os.sep)))
         paths = [os.path.join(work, "cohort", "cohort.g.vcf.gz"),
                  os.path.join(work, "cohort", "cohort.PASS.vcf.gz"),
                  os.path.join(work, "matrix", "genotype_matrix.tsv"),
-                 os.path.join(work, "per_sample_vcf", "S1.PASS.adjudicated.vcf.gz")]
+                 os.path.join(work, "per_sample_vcf", "S1.PASS.adjudicated.vcf.gz"),
+                 # RUN-49：cohort 级 stats 与 MultiQC 自带幂等 SKIP，须随守卫作废
+                 os.path.join(work, "qc", "bcftools_stats", "cohort.raw.stats"),
+                 os.path.join(work, "qc", "multiqc", "x_multiqc_report.html")]
         for p in paths:
             open(p, "wb").write(b"x")
+        mdata = os.path.join(work, "qc", "multiqc", "multiqc_data")
+        os.makedirs(mdata)
+        open(os.path.join(mdata, "multiqc_data.json"), "wb").write(b"x")
         return work, paths
 
     def _guard(self, td, samples_out, hc_ok):
@@ -794,15 +801,19 @@ class TestCohortRerunGuard(unittest.TestCase):
         return work, paths, fired
 
     def test_invalidate_on_sample_set_change(self):
-        """旧 cohort 缺 S3（4 样本 HC 被杀后补跑场景）→ 三个派生目录清空重算"""
+        """旧 cohort 缺 S3（4 样本 HC 被杀后补跑场景）→ 五个派生位置清空重算
+        （含 RUN-49 补漏：cohort 级 stats 与 MultiQC——二者自带幂等 SKIP，
+        不作废则陈旧统计/报告被沿用进通知与交付；multiqc_data/ 子目录整树删）"""
         with tempfile.TemporaryDirectory() as td:
             work, paths, fired = self._guard(td, "S1\nS2\n", ["S1", "S2", "S3"])
             self.assertTrue(fired)
-            for d in ("cohort", "matrix", "per_sample_vcf"):
-                self.assertEqual(os.listdir(os.path.join(work, d)), [])
+            for d in ("cohort", "matrix", "per_sample_vcf",
+                      "qc" + os.sep + "bcftools_stats", "qc" + os.sep + "multiqc"):
+                self.assertEqual(os.listdir(os.path.join(work, *d.split(os.sep))), [])
 
     def test_keep_when_same_set(self):
-        """样本集一致（正常同日续跑）→ 零动作，幂等语义不变（REQ-04）"""
+        """样本集一致（正常同日续跑）→ 零动作，幂等语义不变（REQ-04）；
+        stats/MultiQC 同样保留（含 multiqc_data/ 子目录）"""
         with tempfile.TemporaryDirectory() as td:
             _, paths, fired = self._guard(td, "S1\nS2\n", ["S1", "S2"])
             self.assertFalse(fired)

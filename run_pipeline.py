@@ -1192,14 +1192,17 @@ def _step_anoms(ctx, step_prefix):
             for sm, reason in ctx.failed.items() if reason.startswith(step_prefix)]
 
 
-# ── cohort 复跑守卫（DEC-34/RUN-48）─────────────────────────────────────
+# ── cohort 复跑守卫（DEC-34/RUN-48；RUN-49 补漏）───────────────────────
 def cohort_rerun_guard(runner, work, hc_ok, log, checks=()):
     """断点续跑时 HC 失败样本补回 → gvcf.list 样本集变化，但旧 cohort 链产物
     非空会被幂等 SKIP——旧口径（缺样本）的 cohort/矩阵/每样本 VCF 一路沿用：
     矩阵按旧列数裁决、补回样本 view -s 静默失败，交付残缺还报 success。
     守卫：读现存关键 VCF 的 header 样本清单（bcftools query -l，秒级）与本次
     hc_ok（sorted，与 VCF 列序同口径，DEC-05）比对，不一致即作废
-    cohort/matrix/per_sample_vcf 全部派生产物（均可在链上重算，REQ-04）。
+    cohort/matrix/per_sample_vcf 全部派生产物（均可在链上重算，REQ-04），
+    **连同 qc/bcftools_stats/cohort.*.stats 与 qc/multiqc/ 一并作废（RUN-49）**
+    ——run_stats 按产物非空幂等、run_multiqc 按报告存在幂等，不删则陈旧
+    统计（Ti/Tv 等）与陈旧 MultiQC 报告被 SKIP 沿用进通知与交付。
     dry-run / header 不可读 → 不判不作废（零副作用）。返回 True=已作废重算。"""
     stale = []
     for tag, vcf in checks:
@@ -1210,14 +1213,20 @@ def cohort_rerun_guard(runner, work, hc_ok, log, checks=()):
     if not stale:
         return False
     log.warn("cohort 样本集与本次联合分型名单不一致——" + "；".join(stale)
-             + "。旧 cohort/矩阵/每样本 VCF 作废重算（DEC-34：HC 失败样本补回后"
-               "的断点续跑，防旧口径产物被幂等 SKIP 沿用）")
+             + "。旧 cohort/矩阵/每样本 VCF/cohort 统计/MultiQC 作废重算"
+               "（DEC-34：HC 失败样本补回后的断点续跑，防旧口径产物被幂等 SKIP 沿用；"
+               "RUN-49 补漏 stats 与 MultiQC）")
     for d, pats in ((os.path.join(work, "cohort"), ("*.vcf.gz", "*.vcf.gz.tbi")),
                     (os.path.join(work, "matrix"), ("*.tsv",)),
-                    (os.path.join(work, "per_sample_vcf"), ("*.vcf.gz", "*.vcf.gz.tbi"))):
+                    (os.path.join(work, "per_sample_vcf"), ("*.vcf.gz", "*.vcf.gz.tbi")),
+                    (os.path.join(work, "qc", "bcftools_stats"), ("cohort.*.stats",)),
+                    (os.path.join(work, "qc", "multiqc"), ("*",))):
         for pat in pats:
             for p in glob.glob(os.path.join(d, pat)):
-                os.remove(p)
+                if os.path.isdir(p):
+                    shutil.rmtree(p)   # multiqc_data/ 等子目录
+                else:
+                    os.remove(p)
     return True
 
 

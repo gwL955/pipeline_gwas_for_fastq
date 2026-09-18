@@ -43,9 +43,10 @@ python3 run_pipeline.py --notify-test
 
 中断后**直接重跑同一命令**即可续跑：每个产物（含 .tbi/.metrics/.table）落盘前检查
 存在且非空，已存在即 `[SKIP]`，只补缺失部分。若续跑时联合分型样本集变化
-（如补回 Step 5 失败样本），cohort 复跑守卫（DEC-34）会读现存 cohort VCF 的
-header 样本清单与本次比对，不一致即自动作废旧 cohort/矩阵/每样本 VCF 重算，
-防旧口径产物被幂等 SKIP 沿用、补回样本静默丢失。
+（如补回 Step 5 失败样本），cohort 复跑守卫（DEC-34，RUN-49 补漏）会读现存
+cohort VCF 的 header 样本清单与本次比对，不一致即自动作废旧 cohort/矩阵/
+每样本 VCF/cohort 级统计/MultiQC 报告重算，防旧口径产物被幂等 SKIP 沿用、
+补回样本静默丢失（跨日恢复需 `--out` 显式指回原目录）。
 
 ## 1.1 日志说明（自动输出，无需重定向）
 
