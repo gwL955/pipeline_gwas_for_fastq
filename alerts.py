@@ -23,7 +23,7 @@ OK：全部正常，仅常规里程碑播报
 check_ntc_reads（占批次中位比例）专属口径负责。
 
 消息模板（钉钉 markdown 官方子集：标题/引用/加粗/列表）：
-    [GWAS][P1] 20260720批次 · Step 2 比对完成（共 7 步）
+    [GWAS][P1] 20260720批次 · Step 2 比对完成（共 6 步）
     样本: 4/4 成功 | Lane 合并 16/16
     指标: mapped 98.7% | proper pair 94.2%
     异常: L20260615001 mapped 91.3%（阈值 95%）← 需确认
@@ -241,8 +241,8 @@ def step_milestone(batch, step_no, step_name, *, samples="", metrics="",
                    anomalies=(), artifacts="", log_hint="", extra=(),
                    total_steps=None):
     """→ (title, text)。title 带 [GWAS][P级别]；total_steps 给定时标题尾部
-    追加"（共 X 步）"（X=本次实跑步数 0..--step，v2.22.0/DEC-32——里程碑单条
-    收到时不知全流程还有几步）；正文含小写 gwas 兜底由 dingtalk 补。"""
+    追加"（共 X 步）"（X=--step：Step 0 为清点预备步不计入，全流程=6——
+    RUN-47 修正，首版误用 --step+1 显示 7）；正文含小写 gwas 兜底由 dingtalk 补。"""
     level = worst_level(anomalies)
     title = f"[GWAS][{level}] {batch}批次 · " \
             f"{f'Step {step_no} ' if step_no is not None else ''}{step_name}完成"

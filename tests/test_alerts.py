@@ -271,11 +271,14 @@ class TestMilestone(unittest.TestCase):
             self.assertIn(kw, text)
 
     def test_total_steps_in_title(self):
-        """★ RUN-46/DEC-32：里程碑标题增"（共 X 步）"（X=本次实跑步数）；
-        不传 total_steps 保持旧标题（兼容）"""
-        title, text = alerts.step_milestone("260918", 3, "去重", total_steps=7)
-        self.assertEqual(title, "[GWAS][OK] 260918批次 · Step 3 去重完成（共 7 步）")
-        self.assertIn("#### [GWAS][OK] 260918批次 · Step 3 去重完成（共 7 步）", text)
+        """★ RUN-46/DEC-32 + RUN-47：里程碑标题增"（共 X 步）"，X=--step——
+        Step 0 为清点预备步不计入，全流程共 6 步（首版误用 +1 显示 7）；
+        --step 0（只跑清点）时 0 为假值不追加后缀；不传保持旧标题（兼容）"""
+        title, text = alerts.step_milestone("260918", 3, "去重", total_steps=6)
+        self.assertEqual(title, "[GWAS][OK] 260918批次 · Step 3 去重完成（共 6 步）")
+        self.assertIn("#### [GWAS][OK] 260918批次 · Step 3 去重完成（共 6 步）", text)
+        t_zero, _ = alerts.step_milestone("260918", 0, "清点与Lane合并", total_steps=0)
+        self.assertEqual(t_zero, "[GWAS][OK] 260918批次 · Step 0 清点与Lane合并完成")
         t_no, _ = alerts.step_milestone("260918", 3, "去重")
         self.assertEqual(t_no, "[GWAS][OK] 260918批次 · Step 3 去重完成")
 

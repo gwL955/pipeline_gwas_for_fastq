@@ -3,7 +3,7 @@
 ```yaml
 # ---- design-meta（机器可解析锚点，勿手改格式；版本规则见 §0）----
 doc: GWAS-pipeline-design
-version: 2.22.0
+version: 2.22.1
 updated: 2026-09-18
 owner_human: gewenlong
 owner_machine: ZCode(GLM)
@@ -163,7 +163,7 @@ cohort 级与 MultiQC 串行。样本失败即隔离（记入 failed，退出后
 | DEC-29 | **捕获效率口径重定义（v2.19.0）**：①取消 on-target（ON_TARGET_BASES/PF_UQ_BASES_ALIGNED）告警，降为信息指标（run_summary 照存、报告标注"信息指标"）——新 panel（T4029V1hg38，18,339bp 唯一区间，12,014 区间中 11,548 个为 1bp SNP）下 ON_TARGET_BASES 只计落区间内碱基，一条 150bp read 覆盖 SNP 仅贡献 ~1bp，实测坍缩至 0.58-0.59%——是 panel 几何产物而非捕获质量信号，旧 8% 阈值（DEC-15）对好数据全员误报；②捕获效率告警指标改 PCT_SELECTED_BASES（(ON_BAIT+NEAR_BAIT)/比对碱基，含±250bp 邻域）≥85% → TH-14 改挂 PCT_SELECTED_P1=85.0；③旧文档/注释"PCT_SELECTED(25-28%) 不得误读为捕获效率"废止——那是老 panel（区间长、26-40% 观测）时代的结论 | 同批新 panel 数据双流程交叉验证：本地 CollectHsMetrics 89.42/90.28/90.61% vs 外送 statistic.xls pct_selected_bases 89.59/90.38/90.72%（偏差<0.2pp，外送 reads 口径 Flank capture rate 85.7-87.3% 亦在阈值上方）——PCT_SELECTED 与产业侧"捕获率"直觉同口径；85% 留 ~4.5-5.6pp 裕量，捕获失败（杂交失败/错 panel）塌至 <20% 可有效区分；老 panel 数据（26-40%）不适用本阈值，已切换新 panel |
 | DEC-30 | **告警越界样本全点名（v2.20.0）**：check_fastp/check_flagstat/check_dup/check_capture 由"每指标只点名最差一个样本（_min_item/_max_item）"改为逐越界样本一行、名字序全点名（新辅助 `_violating`，方向参数 below/>）；例外：fastp 保留率 80-95% 提示带为 OK 级聚合一行点名（防提示刷屏）；批级指标（Ti/Tv、call rate、深度 CV）单值无点名问题；check_reads_low 本就逐样本；`_min_item` 保留用于指标播报（Step3 ELS 最小值） | RUN-43 复盘：260918 自测三样本 on-target 0.58/0.59/0.59 全部越界，钉钉只报"TG017 0.58%"一行——"每指标报最差"被代表性误读为"只有一个样本坏"，实为批性口径坍缩；全点名后告警行数上限=批内越界样本数×越界指标数，本仓库批次规模（2-13 样本）可控 |
 | DEC-31 | **非样本条目剔除 + 对照样本告警豁免 + 保留率提示带下调（v2.21.0）**：①scanner 布局识别后剔除 Illumina 下机自带的 Undetermined（BCLConvert 未匹配 index 的 reads；样本名不区分大小写等于 `undetermined` 即剔除，常量 `IGNORED_SAMPLES` 便于日后扩充）——独立 ignored 清单（INFO 日志 + run_summary `samples.ignored` 追溯），不算 invalid、不触发告警，杜绝其进入联合分型/基因型矩阵/Output 交付；②对照样本（`--exclude-samples`，默认 NTC）豁免样本级告警：check_reads_low 对低 reads 对照降级为 OK 级提示行逐个播报实际数值（低 reads 属阴性对照正常态），check_fastp（含提示带统计）/check_flagstat/check_dup/check_capture/check_recal_low/check_depth_cv 与 step2 内联 mapped<TH-05 P1 名单直接跳过对照（实验样本口径指标对对照无统计意义）；新参数均带默认值 `excluded=()`，NTC 仍走全流程 QC（mosdepth 深度供 TH-21 用）；污染监控不豁免，仍由 check_ntc（TH-21 靶区深度）与 check_ntc_reads（TH-34 占批次中位）专属口径负责；③TH-02 FASTP_RETENTION_WARN 95→90，提示带变为 TH-03~02 区间（80-90%） | RUN-45 实跑事故复盘：批次 260918 识别出 49 个"样本"（含 Undetermined 2300 万未匹配 index reads，一路进联合分型/矩阵/Output 污染整批，跑到 Step 3 手动中断）；Step1 钉钉 [P1] 两误报——NTC reads 32 被"上样不足"P1 误报（阴性对照 reads 近 0 属正常）、Undetermined 保留率 73.37% 被 P2 误报（样本级检查不感知 excluded 集合）；提示带把全部 49 样本点名一遍（实测保留率全批 92.18-94.47%，95 线对本 panel 定高失去区分度） |
-| DEC-32 | **指标播报对照豁免 + ELS 统计扩容 + 步骤总数播报（v2.22.0）**：①里程碑与全流程汇总"指标:"行的**样本级指标均值一律排除对照**（`_avg(d, excluded)`：Step2 mapped/pp、Step3 dup、Step6 depth/20X/捕获效率、完成通知质量行）——DEC-31 只豁免了告警点名，播报均值此前仍含 NTC（reads 近 0 拉低批均值）；②Step3 ELS 播报由"ELS 最小 <值>"扩为**均值/方差/最低值+对应样本**三元组（新 `alerts.els_summary(els, excluded)`，科学计数法，方差取总体方差÷n 与深度 CV 同口径），排除对照——NTC 的 ELS 无统计意义且必然占据最低值（曾被误读为"文库复杂度不足"）；`_min_item` 删除（无引用）；③里程碑标题尾部增**"（共 X 步）"**（`step_milestone(total_steps=)`，X=args.step+1 本次实跑步数，全流程=7）；④例外：Step1 里程碑 fastp 保留率/Q30 均值保留含对照原口径（修剪口径对对照同样成立，reads 已由 DEC-31 OK 提示行专属播报）；对照清单写入 run_summary `samples.excluded` | RUN-46 用户复盘：Step3 钉钉"ELS 最小"被 NTC 的极小 ELS 占据（阴性对照 reads 近 0 → 文库复杂度误判），并要求检查其余步骤同类误报——排查结论：Step2 mapped/pp、Step3 dup、Step6 depth/20X/捕获效率与全流程完成通知的质量均值行同样含 NTC 失真（均已修）；Step4 播报为流程健康度计数、Step5 为 cohort 级（对照已排除出 calling）、Step0 无样本级均值，不受影响 |
+| DEC-32 | **指标播报对照豁免 + ELS 统计扩容 + 步骤总数播报（v2.22.0）**：①里程碑与全流程汇总"指标:"行的**样本级指标均值一律排除对照**（`_avg(d, excluded)`：Step2 mapped/pp、Step3 dup、Step6 depth/20X/捕获效率、完成通知质量行）——DEC-31 只豁免了告警点名，播报均值此前仍含 NTC（reads 近 0 拉低批均值）；②Step3 ELS 播报由"ELS 最小 <值>"扩为**均值/方差/最低值+对应样本**三元组（新 `alerts.els_summary(els, excluded)`，科学计数法，方差取总体方差÷n 与深度 CV 同口径），排除对照——NTC 的 ELS 无统计意义且必然占据最低值（曾被误读为"文库复杂度不足"）；`_min_item` 删除（无引用）；③里程碑标题尾部增**"（共 X 步）"**（`step_milestone(total_steps=)`，X=args.step：**Step 0 为清点预备步不计入，全流程=6**——首版误用 args.step+1 显示 7，RUN-47 依用户口径修正）；④例外：Step1 里程碑 fastp 保留率/Q30 均值保留含对照原口径（修剪口径对对照同样成立，reads 已由 DEC-31 OK 提示行专属播报）；对照清单写入 run_summary `samples.excluded` | RUN-46 用户复盘：Step3 钉钉"ELS 最小"被 NTC 的极小 ELS 占据（阴性对照 reads 近 0 → 文库复杂度误判），并要求检查其余步骤同类误报——排查结论：Step2 mapped/pp、Step3 dup、Step6 depth/20X/捕获效率与全流程完成通知的质量均值行同样含 NTC 失真（均已修）；Step4 播报为流程健康度计数、Step5 为 cohort 级（对照已排除出 calling）、Step0 无样本级均值，不受影响 |
 
 ## 5. 统一口径与阈值总表（TH = config.py 镜像）<!-- HUMAN 可改值；MACHINE 同步 config 后过校验 -->
 
@@ -252,14 +252,15 @@ cohort 级与 MultiQC 串行。样本失败即隔离（记入 failed，退出后
 ### 5.4 通知时机与模板
 
 每批次：启动（样本数/输入体量/资源计划+预检结论）→ Step 0-6 每步里程碑（标题含
-"（共 X 步）"，X=本次实跑步数=--step+1，DEC-32）→ 完成/失败；
+"（共 X 步）"，X=--step：Step 0 为清点预备步不计入，全流程=6；DEC-32，RUN-47
+修正首版 +1 口径）→ 完成/失败；
 多批次另有总览。**交付文件推送（DEC-24，v2.15.0）：批次全部结束后逐成功批次
 `Output/<批次>_<日期>/` 打包 zip → 说明消息 + 文件卡片**（多批次统一发送防淹没；
 zip 超 20MB → 分卷压缩多发，DEC-27）。`DINGTALK_MILESTONES=0` 只发异常级（P0/P1）。
 "指标:"行样本级均值与 ELS 统计排除对照（DEC-32）。里程碑模板：
 
 ```
-[GWAS][P1] 20260720批次 · Step 2 比对完成（共 7 步）
+[GWAS][P1] 20260720批次 · Step 2 比对完成（共 6 步）
 样本: 4/4 成功 | Lane 合并 16/16
 指标: mapped 98.7% | proper pair 94.2%
 异常: [P1] L20260615001 mapped 91.3%（阈值 95%）← 需确认
@@ -434,6 +435,8 @@ CI（.github/workflows/ci.yml）在 py3.10/3.12 矩阵执行。
 | 2.21.0 | 2026-09-18 | 机 | DEC-31（RUN-45 事故修复）：①scanner 剔除 Undetermined（`IGNORED_SAMPLES`，不区分大小写）——`ScanResult` 二元组兼容解包 + `.ignored` 清单，step0 记 INFO 日志并写 `samples.ignored`；②对照样本豁免样本级告警：check_reads_low 低 reads 对照降级 OK 级提示行播报实际数值（新增 `excluded` 参数），check_fastp/check_flagstat/check_dup/check_capture/check_recal_low/check_depth_cv 跳过对照（新辅助 `_only_samples`），step2 内联 mapped<TH-05 P1 名单同步跳过，run_pipeline 各调用处传入 `self.excluded`；污染监控仍由 check_ntc/check_ntc_reads 负责；③TH-02 FASTP_RETENTION_WARN 95→90（260918 实测全批 92.18-94.47%，95 线全批点名失去区分度），提示带变 80-90%；测试 136→143（Undetermined 剔除/大小写锚、reads 低对照降级 OK 含数值/多对照逐个点名/默认参数旧行为锚、fastp/depth_cv 豁免跳过锚、提示带 90 阈值锚——93% 不再进带、85% 仍在带）；README §6.3/§7 同步 |
 | 2.22.0 | 2026-09-18 | 人 | 三项：①Step3 ELS 指标检查/播报不得把 NTC 加入分析和通知，播报扩为排除对照后的均值、方差、最低 ELS 值及对应样本；②步骤里程碑通知标题增加"共 X 步"；③除第一步外逐项排查其余步骤是否有 NTC 指标被播报导致误判 |
 | 2.22.0 | 2026-09-18 | 机 | DEC-32（RUN-46）：①`alerts.els_summary(els, excluded)` 替代"ELS 最小"播报（均值/方差[总体方差÷n]/最低值+样本，科学计数法），`_min_item` 删除（无引用）；②`run_pipeline._avg(d, excluded)`——Step2 mapped/pp、Step3 dup、Step6 depth/20X/捕获效率与全流程完成通知质量行的均值排除对照，Step1 保留率/Q30 均值保留原口径（修剪口径对对照同样成立）；排查结论：Step4 播报为流程健康度计数、Step5 为 cohort 级（对照已排除出 calling）、Step0 无样本级均值，无需改；③`step_milestone(total_steps=)` 标题尾追加"（共 X 步）"，X=args.step+1（7 个 _step_notify 调用处透传）；④对照清单写 run_summary `samples.excluded`；测试 143→148（els_summary 排除对照/总体方差/无有效值、_avg 排除锚、标题共X步+不传兼容锚）；README §6.2/§6.3 与 tests README 同步 |
+| 2.22.1 | 2026-09-19 | 人 | 步骤总数播报口径修正：第一步编号为 Step 0（清点与 Lane 合并预备步），"共 X 步"不应把它计入——全流程应显示"共 6 步"而非"共 7 步" |
+| 2.22.1 | 2026-09-19 | 机 | DEC-32③ 修订（RUN-47）：7 个 _step_notify 调用处 total_steps 改传 args.step（原 args.step+1）——--step 6 →"共 6 步"、--step 3 部分跑 →"共 3 步"、--step 0 只跑清点时 0 为假值不追加后缀；step_milestone/_step_notify docstring、alerts 模块模板（共 7 步→共 6 步）、DESIGN §4 DEC-32③/§5.4、README §6.2、内部 README_pipeline、test_total_steps_in_title 锚（7→6 + --step 0 边界）同步；测试 148 不变全绿 |
 
 ## 11. 证据索引 <!-- MACHINE -->
 

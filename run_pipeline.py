@@ -314,7 +314,7 @@ class BatchCtx:
         lanes_merged = sum(len(si.r1) for sm, si in valid.items() if sm in self.merged)
         self.step_time("step0")
         _step_notify(self.notify_on, self.batch, 0, "清点与Lane合并", self.log,
-                     total_steps=self.args.step + 1,
+                     total_steps=self.args.step,
                      samples=f"{len(self.merged)}/{n_initial} 成功 | Lane 合并 {lanes_merged}/{lanes_expected}",
                      metrics=f"输入 {_fmt_gb(input_bytes)} | md5 "
                              f"{'FAIL ' + str(len(md5_failed)) if md5_failed else 'OK'}"
@@ -391,7 +391,7 @@ class BatchCtx:
         self.step_time("step1")
         self.log.result(f"Step 1 完成: 成功 {len(self.merged) - len(self.failed)}/{len(self.merged)}")
         _step_notify(self.notify_on, self.batch, 1, "QC+修剪", self.log,
-                     total_steps=self.args.step + 1,
+                     total_steps=self.args.step,
                      samples=f"{len(self.merged) - len(self.failed)}/{len(self.merged)} 成功",
                      # fastp 保留率/Q30 均值保留含对照原口径（DEC-32：修剪口径对
                      # 对照同样成立；reads 低已由 DEC-31 OK 提示行专属播报）
@@ -456,7 +456,7 @@ class BatchCtx:
         self.step_time("step2")
         self.log.result(f"Step 2 完成: 成功 {len(self.merged) - len(self.failed)}/{len(self.merged)}")
         _step_notify(self.notify_on, self.batch, 2, "比对", self.log,
-                     total_steps=self.args.step + 1,
+                     total_steps=self.args.step,
                      samples=f"{len(self.merged) - len(self.failed)}/{len(self.merged)} 成功",
                      metrics=f"mapped {_avg(self.metrics.get('mapped_pct'), self.excluded)}% | "
                              f"proper pair {_avg(self.metrics.get('pp_pct'), self.excluded)}%",
@@ -522,7 +522,7 @@ class BatchCtx:
         # 其 ELS 无统计意义且必然占据最低值（误读为文库复杂度不足）
         els_str = alerts.els_summary(self.metrics.get("els"), excluded=self.excluded)
         _step_notify(self.notify_on, self.batch, 3, "去重", self.log,
-                     total_steps=self.args.step + 1,
+                     total_steps=self.args.step,
                      samples=f"{len(self.merged) - len(self.failed)}/{len(self.merged)} 成功",
                      metrics=f"重复率 {_avg(self.metrics.get('dup_pct'), self.excluded)}% | "
                              f"ELS {els_str if els_str else 'n/a'}",
@@ -587,7 +587,7 @@ class BatchCtx:
         n_bqsr_ok = len([sm for sm in self.merged if sm not in self.failed])
         self.log.result(f"Step 4 完成: 成功 {n_bqsr_ok}/{len(self.merged)}")
         _step_notify(self.notify_on, self.batch, 4, "BQSR校准", self.log,
-                     total_steps=self.args.step + 1,
+                     total_steps=self.args.step,
                      samples=f"{n_bqsr_ok}/{len(self.merged)} 成功",
                      metrics="markdup↔BQSR flagstat 逐行一致断言 "
                              f"{n_bqsr_ok}/{n_bqsr_ok} 通过",
@@ -773,7 +773,7 @@ class BatchCtx:
                                     + " 为历史运行产物（断点续跑复用）"))
 
         _step_notify(self.notify_on, self.batch, 5, "变异检测", self.log,
-                     total_steps=self.args.step + 1,
+                     total_steps=self.args.step,
                      samples=f"gVCF {len(hc_ok)}/{len(calling)} | 联合分型样本 {len(hc_ok)}",
                      metrics=f"raw {self.cohort_stats['raw'].get('records')} → PASS "
                              f"{self.cohort_stats['PASS'].get('records')} | "
@@ -942,7 +942,7 @@ class BatchCtx:
         ntc_depth = (self.metrics.get("mosdepth_mean") or {}).get("NTC") \
             if self.excluded else None
         _step_notify(self.notify_on, self.batch, 6, "质量汇总", self.log,
-                     total_steps=self.args.step + 1,
+                     total_steps=self.args.step,
                      samples=f"{len(self.merged) - len(self.failed)}/{len(self.merged)} 成功 | "
                              f"裁决 {len(self.bdata.get('_adj_vcfs') or {})} 样本",
                      # 均值排除对照（DEC-32）：NTC 深度近 0 会显著拉低批均值；
@@ -1183,7 +1183,8 @@ def _step_anoms(ctx, step_prefix):
 
 
 def _step_notify(notify_on, batch, step_no, name, log, total_steps=None, **kw):
-    """步骤里程碑通知。total_steps=本次实跑步数（标题"（共 X 步）"，DEC-32）；
+    """步骤里程碑通知。total_steps=--step（编号步数：Step 0 为清点预备步不计入，
+    全流程共 6 步；标题"（共 X 步）"，DEC-32，RUN-47 修正首版 +1 口径）；
     DINGTALK_MILESTONES=0 时只发异常级（P0/P1），OK 级静默。"""
     if not notify_on:
         return
