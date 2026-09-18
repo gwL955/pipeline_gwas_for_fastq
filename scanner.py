@@ -21,6 +21,11 @@ FLAT_OUTSOURCED_RE = re.compile(r"^(?P<sample>.+)_R(?P<read>[12])\.fastq\.gz$")
 LAYOUT_LABELS = {"illumina": "平铺", "outsourced": "外送",
                  "outsourced_flat": "外送平铺"}
 
+# 布局识别后直接剔除的非样本条目（DEC-31，样本名不区分大小写）：Illumina 下机
+# 自带 Undetermined（BCLConvert 未匹配 index 的 reads，常为千万级）不是实验
+# 样本，不得进入分析——曾一路进联合分型/基因型矩阵/Output 污染整批（RUN-45）
+IGNORED_SAMPLES = {"undetermined"}
+
 
 class SampleInfo:
     def __init__(self, sample, layout):
@@ -98,8 +103,21 @@ def scan_outsourced_flat(flat, subdirs):
 LAYOUT_SCANNERS = (scan_illumina_flat, scan_outsourced_subdir, scan_outsourced_flat)
 
 
+class ScanResult(tuple):
+    """(valid, invalid) 二元组 + 附带 ignored 清单（DEC-31）。
+    既有 `valid, invalid = scan_batch(...)` 解包不受影响；ignored 经
+    `.ignored` 属性访问（Undetermined 等非样本条目，不算 invalid、不告警）。"""
+
+    def __new__(cls, valid, invalid, ignored):
+        self = super().__new__(cls, (valid, invalid))
+        self.ignored = ignored
+        return self
+
+
 def scan_batch(batch_dir):
-    """扫描批次目录 → (有效样本 dict, 无效样本 dict{sm: reason})。
+    """扫描批次目录 → (有效样本 dict, 无效样本 dict{sm: reason})，
+    附 `.ignored` 名单（DEC-31：IGNORED_SAMPLES 命中的非样本条目，如 Illumina
+    下机自带的 Undetermined——剔除后不进分析，独立清单供 run_summary 追溯）。
     布局按 LAYOUT_SCANNERS 依序识别：先认者优先，同一样本名被后到的
     布局再认出 → 后者记冲突无效；不匹配任何布局的文件不构成样本（忽略）。
     输入校验：R1/R2 文件数不一致、单端、0 字节 → 标记无效并跳过。"""
@@ -119,6 +137,10 @@ def scan_batch(batch_dir):
             elif sm not in invalid:
                 samples[sm] = si
 
+    ignored = sorted(sm for sm in samples if sm.lower() in IGNORED_SAMPLES)
+    for sm in ignored:
+        samples.pop(sm)
+
     # 校验
     for sm, si in sorted(samples.items()):
         if si.layout == "illumina":
@@ -137,7 +159,7 @@ def scan_batch(batch_dir):
             invalid[sm] = si.invalid_reason
 
     valid = {sm: si for sm, si in samples.items() if si.valid}
-    return valid, invalid
+    return ScanResult(valid, invalid, ignored)
 
 
 # ── md5 校验（并行；失败样本终止分析并进入通知） ────────────────────────

@@ -100,6 +100,31 @@ class TestScanLayouts(unittest.TestCase):
             self.assertEqual(valid, {})
             self.assertIn("0 字节", invalid["SM"])
 
+    def test_undetermined_ignored(self):
+        """★ RUN-45/DEC-31：Illumina 下机自带 Undetermined（BCLConvert 未匹配
+        index reads）不得作为样本进入分析——曾一路进联合分型/基因型矩阵/Output
+        污染整批。剔除后进 ignored 清单：不算 invalid、不触发告警；
+        既有 `valid, invalid = scan_batch(...)` 二元组解包不受影响"""
+        with tempfile.TemporaryDirectory() as td:
+            for r in ("R1", "R2"):
+                _touch(os.path.join(td, f"SM_S1_L001_{r}_001.fastq.gz"))
+                _touch(os.path.join(td, f"Undetermined_S0_L001_{r}_001.fastq.gz"))
+            res = scanner.scan_batch(td)
+            valid, invalid = res                    # 二元组解包兼容锚
+            self.assertEqual(list(valid), ["SM"])
+            self.assertNotIn("Undetermined", valid)
+            self.assertNotIn("Undetermined", invalid)   # 不算 invalid
+            self.assertIn("Undetermined", res.ignored)  # 进独立 ignored 清单
+
+    def test_undetermined_match_case_insensitive(self):
+        """剔除规则不区分大小写（IGNORED_SAMPLES 常量，便于日后扩充）"""
+        with tempfile.TemporaryDirectory() as td:
+            for r in ("R1", "R2"):
+                _touch(os.path.join(td, f"undetermined_S0_L001_{r}_001.fastq.gz"))
+            res = scanner.scan_batch(td)
+            self.assertEqual(res[0], {})
+            self.assertEqual(res.ignored, ["undetermined"])
+
 
 class TestMd5(unittest.TestCase):
 

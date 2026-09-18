@@ -12,8 +12,15 @@ OK：全部正常，仅常规里程碑播报
 样本点名规则（v2.20.0/DEC-30）：逐指标**越界样本全点名**，每样本一行（名字序）；
 此前实现每指标只点名最差一个样本（RUN-43 复盘：三样本 on-target 0.58/0.59/0.59
 全部越界、钉钉只报 0.58 一个，代表性误读为"只有一个样本坏"）。例外：fastp 保留率
-80-95% 提示带为 OK 级，聚合一行点名（防提示刷屏）；批级指标（Ti/Tv、call rate、
-深度 CV）本就单值无点名问题。逐样本完整数值以 run_summary.json 为准。
+80-90% 提示带（TH-02~03，v2.21.0 由 80-95 下调）为 OK 级，聚合一行点名（防提示
+刷屏）；批级指标（Ti/Tv、call rate、深度 CV）本就单值无点名问题。逐样本完整数值
+以 run_summary.json 为准。
+
+对照样本豁免（v2.21.0/DEC-31）：excluded（--exclude-samples，默认 NTC）命中的
+对照样本豁免样本级阈值——reads 低属阴性对照正常态，check_reads_low 降级为 OK 级
+提示行播报实际数值；其余样本级指标（保留率/Q30/mapped/dup/捕获/recal/CV）对对照
+无统计意义，直接跳过。污染监控不在此列，仍由 check_ntc（靶区深度）与
+check_ntc_reads（占批次中位比例）专属口径负责。
 
 消息模板（钉钉 markdown 官方子集：标题/引用/加粗/列表）：
     [GWAS][P1] 20260720批次 · Step 2 比对完成
@@ -67,10 +74,21 @@ def _violating(d, threshold, below=True):
             if (v < threshold if below else v > threshold)]
 
 
+def _only_samples(d, excluded):
+    """剔除对照样本后的指标 dict（DEC-31）：样本级实验口径指标（保留率/mapped/
+    dup/捕获/recal/深度 CV）对对照样本无统计意义，一律跳过——污染监控由
+    check_ntc/check_ntc_reads 专属口径负责，不走这些检查"""
+    if not excluded:
+        return d or {}
+    return {sm: v for sm, v in (d or {}).items() if sm not in excluded}
+
+
 # ── 各步阈值检查（返回 anomalies 列表） ────────────────────────────────
-def check_fastp(retention, q30):
+def check_fastp(retention, q30, excluded=()):
     """越界样本全点名（DEC-30）：保留率/Q30 逐样本一行；
-    80-95% 提示带为 OK 级，聚合一行点名（不逐行刷屏）"""
+    80-90% 提示带为 OK 级，聚合一行点名（不逐行刷屏）；对照样本跳过（DEC-31）"""
+    retention = _only_samples(retention, excluded)
+    q30 = _only_samples(q30, excluded)
     out = []
     for sm, v in _violating(retention, config.FASTP_RETENTION_P1):
         out.append(("P2", f"{sm} fastp 保留率 {v}%（阈值 {config.FASTP_RETENTION_P1}%）"))
@@ -85,7 +103,9 @@ def check_fastp(retention, q30):
     return out
 
 
-def check_flagstat(mapped_pct, pp_pct):
+def check_flagstat(mapped_pct, pp_pct, excluded=()):
+    mapped_pct = _only_samples(mapped_pct, excluded)
+    pp_pct = _only_samples(pp_pct, excluded)
     out = []
     for sm, v in _violating(mapped_pct, config.MAPPED_NOTIFY_P1):
         out.append(("P2", f"{sm} mapped {v}%（阈值 {config.MAPPED_NOTIFY_P1}%）"))
@@ -94,15 +114,19 @@ def check_flagstat(mapped_pct, pp_pct):
     return out
 
 
-def check_dup(dup_pct):
+def check_dup(dup_pct, excluded=()):
     return [("P2", f"{sm} 重复率 {v}%（阈值 {config.DUP_P1}%，建库复杂度告急）")
-            for sm, v in _violating(dup_pct, config.DUP_P1, below=False)]
+            for sm, v in _violating(_only_samples(dup_pct, excluded),
+                                    config.DUP_P1, below=False)]
 
 
-def check_capture(mean_depth, pct20x, pct_selected):
+def check_capture(mean_depth, pct20x, pct_selected, excluded=()):
     """捕获效率口径 v2.19.0/DEC-29：PCT_SELECTED_BASES（on+near bait 占比对碱基比）
     为告警指标；on-target 不再告警（1bp SNP panel 下为几何产物，见 run_summary 信息指标）。
-    越界样本全点名（DEC-30）"""
+    越界样本全点名（DEC-30）；对照样本跳过（DEC-31）"""
+    mean_depth = _only_samples(mean_depth, excluded)
+    pct20x = _only_samples(pct20x, excluded)
+    pct_selected = _only_samples(pct_selected, excluded)
     out = []
     for sm, v in _violating(mean_depth, config.MEAN_DEPTH_P1):
         out.append(("P2", f"{sm} mean depth {v}×（阈值 {config.MEAN_DEPTH_P1}×）"))
@@ -128,13 +152,21 @@ def check_ntc(ntc_depth):
     return []
 
 
-def check_reads_low(reads):
-    """reads: {sm: after_reads}——绝对量过低 → P1（上样不足，报错不中断，RUN-34）"""
+def check_reads_low(reads, excluded=()):
+    """reads: {sm: after_reads}——绝对量过低 → P1（上样不足，报错不中断，RUN-34）。
+    对照样本（excluded，如 NTC）reads 接近 0 是正常状态：不按实验样本口径告警，
+    降级为 OK 级提示行逐个播报实际数值（DEC-31）——reads 偏高属污染，由
+    check_ntc_reads 占批次中位口径负责；数值缺失（None/非数值）不报"""
     out = []
     for sm, n in sorted((reads or {}).items()):
-        if isinstance(n, (int, float)) and n < config.READS_MIN:
+        if not isinstance(n, (int, float)) or n >= config.READS_MIN:
+            continue
+        if sm in excluded:
+            out.append(("OK", f"{sm} reads {int(n)}（阴性对照，低 reads 属正常；"
+                              f"reads 偏高属污染，由 NTC reads 占中位口径负责）"))
+        else:
             out.append(("P1", f"{sm} reads {int(n)} < {config.READS_MIN}"
-                               f"（上样不足，结果可信度存疑）"))
+                              f"（上样不足，结果可信度存疑）"))
     return out
 
 
@@ -150,9 +182,11 @@ def check_ntc_reads(ntc_reads, median_reads):
     return []
 
 
-def check_depth_cv(mean_depth):
-    """批次内样本间 mean depth 变异系数 CV 过大 → P2（疑似混入异常样本）"""
-    vals = [v for v in (mean_depth or {}).values() if isinstance(v, (int, float))]
+def check_depth_cv(mean_depth, excluded=()):
+    """批次内样本间 mean depth 变异系数 CV 过大 → P2（疑似混入异常样本）；
+    对照样本深度近 0 会拉爆 CV，不参与统计（DEC-31）"""
+    vals = [v for sm, v in (mean_depth or {}).items()
+            if isinstance(v, (int, float)) and sm not in excluded]
     if len(vals) < 2:
         return []
     mean = sum(vals) / len(vals)
@@ -165,10 +199,11 @@ def check_depth_cv(mean_depth):
     return []
 
 
-def check_recal_low(obs):
-    """recal: {sm: M 事件观测数}——known-sites 覆盖崩坏致校准不可信 → P2"""
+def check_recal_low(obs, excluded=()):
+    """recal: {sm: M 事件观测数}——known-sites 覆盖崩坏致校准不可信 → P2；
+    对照样本跳过（DEC-31）"""
     out = []
-    for sm, n in sorted((obs or {}).items()):
+    for sm, n in sorted(_only_samples(obs, excluded).items()):
         if isinstance(n, (int, float)) and n < config.RECAL_OBS_MIN_P2:
             out.append(("P2", f"{sm} BQSR recal 观测数 {int(n)} < {int(config.RECAL_OBS_MIN_P2)}"
                               f"（known-sites 覆盖异常，校准不可信）"))

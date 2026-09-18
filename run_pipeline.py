@@ -184,7 +184,14 @@ class BatchCtx:
         """Step 0：清点/md5/磁盘依赖与样本名预检（DEC-19：P0 阻断）/Lane 合并/samples.tsv。
         无有效样本时返回 bdata（批次 skipped），正常返回 None。"""
         self._t0 = time.time()
-        valid, invalid = scanner.scan_batch(self.batch_dir)
+        scan = scanner.scan_batch(self.batch_dir)
+        valid, invalid = scan
+        # Undetermined 等非样本条目（DEC-31）：剔除不进分析，记 INFO 日志并写入
+        # run_summary 的 samples.ignored 供追溯（不算 invalid、不触发告警）
+        self.bdata["samples"]["ignored"] = list(scan.ignored)
+        for sm in scan.ignored:
+            self.log.info(f"忽略非样本条目: {sm}（Illumina 下机自带未匹配 index reads，"
+                          f"不进分析，DEC-31）")
         if self.args.samples:
             keep = {s.strip() for s in self.args.samples.split(",") if s.strip()}
             for sm in list(valid):
@@ -388,8 +395,10 @@ class BatchCtx:
                              f"Q30 {_avg(self.metrics.get('q30_pct'))}%",
                      anomalies=_step_anoms(self, "step1")
                                + alerts.check_fastp(self.metrics.get("fastp_retention"),
-                                                    self.metrics.get("q30_pct"))
-                               + alerts.check_reads_low(self.metrics.get("reads"))
+                                                    self.metrics.get("q30_pct"),
+                                                    excluded=self.excluded)
+                               + alerts.check_reads_low(self.metrics.get("reads"),
+                                                        excluded=self.excluded)
                                + self._ntc_reads_anoms(),
                      artifacts=f"fastq_clean/*_R*.fastq.gz "
                                + alerts.artifact_summary(os.path.join(self.work, "fastq_clean", "*_R*.fastq.gz")),
@@ -448,11 +457,13 @@ class BatchCtx:
                              f"proper pair {_avg(self.metrics.get('pp_pct'))}%",
                      anomalies=_step_anoms(self, "step2")
                                + alerts.check_flagstat(self.metrics.get("mapped_pct"),
-                                                       self.metrics.get("pp_pct"))
+                                                       self.metrics.get("pp_pct"),
+                                                       excluded=self.excluded)
                                + [("P1", f"{sm} mapped {v}% < {config.MAPPED_MIN_PCT}%"
                                          f"（QC 口径，报错不中断）")
                                   for sm, v in sorted((self.metrics.get("mapped_pct") or {}).items())
-                                  if v is not None and v < config.MAPPED_MIN_PCT],
+                                  if sm not in self.excluded
+                                  and v is not None and v < config.MAPPED_MIN_PCT],
                      artifacts=f"bam/*/*.sort.bam "
                                + alerts.artifact_summary(os.path.join(self.work, "bam", "*", "*.sort.bam")),
                      log_hint=f"tail -f {self.work}/logs/sample_<样本>.self.log")
@@ -507,7 +518,8 @@ class BatchCtx:
                      metrics=f"重复率 {_avg(self.metrics.get('dup_pct'))}% | "
                              f"ELS 最小 {alerts._min_item(self.metrics.get('els'))[1]}",
                      anomalies=_step_anoms(self, "step3")
-                               + alerts.check_dup(self.metrics.get("dup_pct")),
+                               + alerts.check_dup(self.metrics.get("dup_pct"),
+                                                  excluded=self.excluded),
                      artifacts=f"bam/*/*.markdup.bam "
                                + alerts.artifact_summary(os.path.join(self.work, "bam", "*", "*.markdup.bam")),
                      log_hint=f"tail -f {self.work}/logs/sample_<样本>.self.log")
@@ -570,7 +582,8 @@ class BatchCtx:
                      metrics="markdup↔BQSR flagstat 逐行一致断言 "
                              f"{n_bqsr_ok}/{n_bqsr_ok} 通过",
                      anomalies=_step_anoms(self, "step4")
-                               + alerts.check_recal_low(self.metrics.get("recal_obs")),
+                               + alerts.check_recal_low(self.metrics.get("recal_obs"),
+                                                        excluded=self.excluded),
                      artifacts=f"bam/*/*.markdup.BQSR.bam "
                                + alerts.artifact_summary(os.path.join(self.work, "bam", "*", "*.markdup.BQSR.bam")),
                      log_hint=f"tail -f {self.work}/logs/sample_<样本>.self.log")
@@ -930,7 +943,8 @@ class BatchCtx:
                                + alerts.check_capture(
                                    self.metrics.get("mean_target_coverage"),
                                    self.metrics.get("pct_20x"),
-                                   self.metrics.get("pct_selected"))
+                                   self.metrics.get("pct_selected"),
+                                   excluded=self.excluded)
                                + alerts.check_variantqc(
                                    self.cohort_stats.get("PASS", {}).get("titv"), call_rate)
                                + alerts.check_ntc(ntc_depth)
@@ -938,7 +952,8 @@ class BatchCtx:
                                   for sm, v in sorted((self.metrics.get("pass_records") or {}).items())
                                   if v == 0]
                                + alerts.check_depth_cv(
-                                   self.metrics.get("mean_target_coverage")),
+                                   self.metrics.get("mean_target_coverage"),
+                                   excluded=self.excluded),
                      artifacts=f"MultiQC + 裁决VCF "
                                + alerts.artifact_summary(os.path.join(
                                    self.work, "per_sample_vcf", "*.PASS.adjudicated.vcf.gz")),

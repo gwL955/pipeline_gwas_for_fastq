@@ -9,7 +9,7 @@ from pathlib import Path
 
 # ── 流程版本（与 design_doc/DESIGN.md design-meta version 同步，
 #    check_design.py 校验两处一致；写进 run_summary 与交付 README） ──────
-PIPELINE_VERSION = "2.20.0"
+PIPELINE_VERSION = "2.21.0"
 
 # ── 工作区 ──────────────────────────────────────────────────────────────
 PIPELINE_DIR = Path(__file__).resolve().parent          # $WORK/pipeline
@@ -118,7 +118,11 @@ INDEL_HARD_FILTERS = [
 ]
 
 # ── QC 阈值 ─────────────────────────────────────────────────────────────
-FASTP_RETENTION_WARN = 95.0     # 保留率 %，低于告警
+FASTP_RETENTION_WARN = 90.0     # 保留率 %，低于提示（与 P1 线 80 之间构成提示带）。
+                                # v2.21.0/DEC-31 由 95 下调：260918 批次实测全部样本
+                                # 92.18-94.47%，为本 panel + --length_required 36
+                                # 修剪口径下的批次正常基线——95 线致提示带全批点名、
+                                # 失去区分度；90 后只点名真偏低样本（RUN-45）
 MAPPED_MIN_PCT = 90.0           # 比对率 QC 口径下限（<90 → P1 报错不中断，v2.9.0）
 DUP_WARN_PCT = 30.0             # 重复率上限（>30 且 ELS 偏小 → 文库复杂度不足）
 MEAN_COV_MIN = 50.0             # MEAN/MED_TARGET_COVERAGE 下限

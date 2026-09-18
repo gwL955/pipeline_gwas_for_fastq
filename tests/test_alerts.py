@@ -35,8 +35,19 @@ class TestChecks(unittest.TestCase):
         self.assertEqual(a[-1][0], "P2")           # Q30 <85 → P2（保留率提示行可能排前）
         self.assertIn("Q30", a[-1][1])
         self.assertEqual(alerts.check_fastp({"A": 99.0}, {"A": 95.0}), [])
-        levels = [lv for lv, _ in alerts.check_fastp({"A": 90.0}, {"A": 95.0})]
-        self.assertEqual(levels, ["OK"])            # 80-95 区间为提示行不升级
+        levels = [lv for lv, _ in alerts.check_fastp({"A": 85.0}, {"A": 95.0})]
+        self.assertEqual(levels, ["OK"])            # 80-90 区间为提示行不升级（TH-02=90）
+
+    def test_fastp_band_threshold_90(self):
+        """★ RUN-45/DEC-31：提示带上沿 TH-02 由 95 调 90——93%（旧带内）不再
+        进提示带，85% 仍在带内（260918 实测全批 92.18-94.47%，95 线全批点名
+        失去区分度）"""
+        self.assertEqual(alerts.check_fastp({"A": 93.0}, {"A": 95.0}), [])
+        self.assertEqual(alerts.check_fastp({"A": 90.0}, {"A": 95.0}), [])   # 带不含 90 本身
+        a = alerts.check_fastp({"A": 85.0}, {"A": 95.0})
+        self.assertEqual(len(a), 1)
+        self.assertEqual(a[0][0], "OK")
+        self.assertIn("A 85.0%", a[0][1])
 
     def test_fastp_all_violators_named(self):
         # 全点名（DEC-30）：多个越界样本逐个一行，不再只报最差一个
@@ -45,12 +56,12 @@ class TestChecks(unittest.TestCase):
         self.assertIn("A", a[0][1])
         self.assertIn("B", a[1][1])
         self.assertNotIn("C", a[0][1] + a[1][1])
-        # 80-95 提示带：OK 级聚合一行点名全部带内样本
-        a = alerts.check_fastp({"A": 92.0, "B": 93.5, "C": 99.0}, {"A": 95.0})
+        # 80-90 提示带：OK 级聚合一行点名全部带内样本
+        a = alerts.check_fastp({"A": 82.0, "B": 83.5, "C": 99.0}, {"A": 95.0})
         self.assertEqual(len(a), 1)
         self.assertEqual(a[0][0], "OK")
-        self.assertIn("A 92.0%", a[0][1])
-        self.assertIn("B 93.5%", a[0][1])
+        self.assertIn("A 82.0%", a[0][1])
+        self.assertIn("B 83.5%", a[0][1])
 
     def test_flagstat(self):
         a = alerts.check_flagstat({"A": 91.0}, {"A": 99.0})
@@ -146,6 +157,59 @@ class TestNewChecks(unittest.TestCase):
         self.assertEqual(a[0][0], "P2")
         self.assertIn("校准不可信", a[0][1])
         self.assertEqual(alerts.check_recal_low({"B": 45782114.0}), [])
+
+
+class TestControlExemption(unittest.TestCase):
+    """★ RUN-45/DEC-31：对照样本（excluded）豁免样本级阈值——reads 低降级 OK
+    级提示行播报实际数值；其余指标直接跳过；污染仍由 check_ntc/check_ntc_reads
+    专属口径负责（NTC reads 32 曾被"上样不足"P1 误报、保留率 73.37% 被 P2 误报）"""
+
+    def test_reads_low_control_downgraded_to_ok(self):
+        # 低 reads 的 NTC 不再 P1，而是 OK 级提示行且文案含实际数值；普通样本越界仍 P1
+        a = alerts.check_reads_low({"NTC": 32, "A": 500000, "B": 5000000},
+                                   excluded={"NTC"})
+        p1 = [x for x in a if x[0] == "P1"]
+        ok = [x for x in a if x[0] == "OK"]
+        self.assertEqual(len(p1), 1)
+        self.assertIn("A", p1[0][1])                # 普通样本照常 P1 全点名
+        self.assertEqual(len(ok), 1)
+        self.assertIn("NTC", ok[0][1])
+        self.assertIn("32", ok[0][1])               # 播报实际数值
+        self.assertIn("阴性对照", ok[0][1])
+        # 不传 excluded（默认）→ 行为与旧版一致，NTC 仍 P1
+        a = alerts.check_reads_low({"NTC": 32})
+        self.assertEqual(a[0][0], "P1")
+        # reads 数值缺失（None/非数值）的对照不报
+        self.assertEqual(alerts.check_reads_low({"NTC": None}, excluded={"NTC"}), [])
+
+    def test_reads_low_multiple_controls_each_named(self):
+        # 多个对照样本逐个点名（DEC-30 名字序全点名风格）
+        a = alerts.check_reads_low({"NTC1": 10, "NTC2": 20},
+                                   excluded={"NTC1", "NTC2"})
+        self.assertEqual([lv for lv, _ in a], ["OK", "OK"])
+        self.assertIn("NTC1", a[0][1])
+        self.assertIn("NTC2", a[1][1])
+
+    def test_fastp_excluded_control_skipped(self):
+        # 对照保留率/Q30 不进 P2 越界点名、不进提示带统计；普通样本带内照常提示
+        a = alerts.check_fastp({"NTC": 73.37, "A": 85.0}, {"NTC": 70.0, "A": 95.0},
+                               excluded={"NTC"})
+        self.assertEqual(len(a), 1)
+        self.assertEqual(a[0][0], "OK")             # 仅 A 85% 提示带聚合行
+        self.assertNotIn("NTC", a[0][1])
+        self.assertEqual(alerts.check_fastp({"NTC": 73.37}, {"NTC": 70.0},
+                                            excluded={"NTC"}), [])
+
+    def test_depth_cv_excluded_control_skipped(self):
+        # NTC 深度近 0 会拉爆批次 CV，对照不参与统计；真实离散仍报
+        self.assertEqual(alerts.check_depth_cv({"NTC": 0.5, "A": 100.0, "B": 102.0},
+                                               excluded={"NTC"}), [])
+        a = alerts.check_depth_cv({"NTC": 0.5, "A": 50.0, "B": 300.0},
+                                  excluded={"NTC"})
+        self.assertEqual(a[0][0], "P2")
+        # 不传 excluded（默认）→ NTC 参与统计拉爆 CV（旧行为保持）
+        self.assertEqual(alerts.check_depth_cv({"NTC": 0.5, "A": 100.0, "B": 102.0})[0][0],
+                         "P2")
 
 class TestMilestone(unittest.TestCase):
 

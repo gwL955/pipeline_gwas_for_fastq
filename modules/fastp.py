@@ -60,7 +60,7 @@ def parse_json(json_path):
 
 
 def check_retention(metrics, logger):
-    """保留率 <95% 的样本告警"""
+    """保留率 <FASTP_RETENTION_WARN（TH-02）的样本告警"""
     pct = metrics.get("retention_pct")
     if pct is None:
         return

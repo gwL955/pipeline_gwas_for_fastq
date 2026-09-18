@@ -3,7 +3,7 @@
 ```yaml
 # ---- design-meta（机器可解析锚点，勿手改格式；版本规则见 §0）----
 doc: GWAS-pipeline-design
-version: 2.20.0
+version: 2.21.0
 updated: 2026-09-18
 owner_human: gewenlong
 owner_machine: ZCode(GLM)
@@ -118,8 +118,8 @@ sorted.bed/interval_list 与 bed 同目录生成；sorted.bed 按 genome.dict �
 
 | Step | 操作（容器工具与关键语义） | 产物〔幂等键〕 | 分级检查 |
 | --- | --- | --- | --- |
-| **0 清点与合并** | 扫描三种布局（Illumina 平铺 `<样本>_S#_L###_R[12]_001.fastq.gz` / 外送子目录 `<样本>/<样本>_R[12].fastq.gz` / 外送平铺 `<样本>_R[12].fastq.gz`，DEC-23 识别器独立函数依序应用、先认者优先）→ `--samples` 白名单过滤 → **批次名/样本名白名单 `[A-Za-z0-9_.-]` 含中文即 P0（DEC-19）** → md5 并行校验 → 磁盘/依赖预检 → 多 Lane `cat` 合并（并行）→ samples.tsv | `fastq_merged/<样本>_R{1,2}.fastq.gz`、`samples.tsv` | P0：批次名/样本名非法/依赖缺失/磁盘不足/md5 损坏（统一 raise 中断批次）；P1：合并失败（样本终止）；启动通知含全部预检结论 |
-| **1 QC+修剪** | fastqc(raw) → fastp（`-l 36`、adapter 自动检测，线程=fastp_threads）→ fastqc(trim) + **Adapter raw→trim 复检** | `fastq_clean/<样本>_R{1,2}.fastq.gz`〔fastp html/json〕、`qc/fastqc_raw|fastqc_trim|fastp`〔fastqc zip〕 | P1：reads<1M（TH-33）；P2：保留率<80/Q30<85（TH-03/04）、NTC reads 占比>1%（TH-34） |
+| **0 清点与合并** | 扫描三种布局（Illumina 平铺 `<样本>_S#_L###_R[12]_001.fastq.gz` / 外送子目录 `<样本>/<样本>_R[12].fastq.gz` / 外送平铺 `<样本>_R[12].fastq.gz`，DEC-23 识别器独立函数依序应用、先认者优先）→ **剔除 IGNORED_SAMPLES 命中的非样本条目（Undetermined，DEC-31：INFO 日志 + samples.ignored，不算 invalid 不告警）** → `--samples` 白名单过滤 → **批次名/样本名白名单 `[A-Za-z0-9_.-]` 含中文即 P0（DEC-19）** → md5 并行校验 → 磁盘/依赖预检 → 多 Lane `cat` 合并（并行）→ samples.tsv | `fastq_merged/<样本>_R{1,2}.fastq.gz`、`samples.tsv` | P0：批次名/样本名非法/依赖缺失/磁盘不足/md5 损坏（统一 raise 中断批次）；P1：合并失败（样本终止）；启动通知含全部预检结论 |
+| **1 QC+修剪** | fastqc(raw) → fastp（`-l 36`、adapter 自动检测，线程=fastp_threads）→ fastqc(trim) + **Adapter raw→trim 复检** | `fastq_clean/<样本>_R{1,2}.fastq.gz`〔fastp html/json〕、`qc/fastqc_raw|fastqc_trim|fastp`〔fastqc zip〕 | P1：reads<1M（TH-33，**对照样本降级 OK 提示行，DEC-31**）；P2：保留率<80/Q30<85（TH-03/04，TH-02~03 提示带、对照豁免 DEC-31）、NTC reads 占比>1%（TH-34） |
 | **2 比对** | `bwa-mem2 mem -K 100000000 -Y -R '@RG…SM:样本' | samtools sort -@T -m SORT_MEM`（管道流式）→ `samtools index` → flagstat/stats | `bam/<样本>/<样本>.sort.bam(+.bai)`〔sort.bam+.bai〕、`qc/flagstat|stats`〔对应文件〕 | P1：mapped<90 QC 口径（TH-05，报错不中断）；P2：mapped<95/pp<85（TH-06/07） |
 | **3 去重** | `gatk MarkDuplicates` → markdup.bam + metrics → flagstat/stats（去重前 duplicates 行不采集） | `bam/<样本>/<样本>.markdup.bam`〔markdup.bam+metrics〕 | P2：dup>30%（TH-09） |
 | **4 BQSR** | `gatk BaseRecalibrator`（dbsnp+Mills）→ recal.table → `ApplyBQSR` → **BQSR 前后 flagstat 逐行一致断言**（不一致该样本失败隔离） | `bam/<样本>/<样本>.recal.table`、`<样本>.markdup.BQSR.bam`〔BQSR bam+table〕 | P2：recal M 事件观测数<1e5（TH-36，校准不可信） |
@@ -162,6 +162,7 @@ cohort 级与 MultiQC 串行。样本失败即隔离（记入 failed，退出后
 | DEC-28 | **失败路径健壮性 + 靶区派生口径（v2.18.0）**：①process_batch 异常分支改用 `ctx.notify_on`（进 try 前即赋值）——曾读仅在成功汇总段赋值的局部 `notify_on`，step 中途抛异常即 UnboundLocalError：失败通知发不出且裸 traceback 炸穿 main()；②HC `-L` 改用 interval_list（字典口径+DEC-26 唯一合并）不用 sorted.bed——GATK 引擎对 -L 区间 contig 严格校验字典，bed 含字典外 contig 即 USER ERROR（samtools -L/mosdepth --by 实测容忍，bcftools/mosdepth 仍用 bed）；③sorted.bed 生成 awk 增 genome.dict contig 白名单（`$1 in c`，字典外行丢弃、_bed_contigs−_dict_contigs 差集 WARN 点名）；④派生靶区文件新鲜度 `_derived_stale`：源 mtime 更新即重建（重建命令不传 runner outputs——陈旧但非空会被 runner 自身幂等误跳过，幂等判断上收 prep） | RUN-42 实跑事故三层：新 panel bed 含 chr22_KI270879v1_alt → 三样本 HC 全部 exit 2 → except 崩于 notify_on → 无通知+裸 traceback（nohup 控制台止于日志路径行，形同静默死亡）；且 sorted.bed 为手工符号链接非空被幂等跳过，换 bed 后陈旧派生一路带进下游 |
 | DEC-29 | **捕获效率口径重定义（v2.19.0）**：①取消 on-target（ON_TARGET_BASES/PF_UQ_BASES_ALIGNED）告警，降为信息指标（run_summary 照存、报告标注"信息指标"）——新 panel（T4029V1hg38，18,339bp 唯一区间，12,014 区间中 11,548 个为 1bp SNP）下 ON_TARGET_BASES 只计落区间内碱基，一条 150bp read 覆盖 SNP 仅贡献 ~1bp，实测坍缩至 0.58-0.59%——是 panel 几何产物而非捕获质量信号，旧 8% 阈值（DEC-15）对好数据全员误报；②捕获效率告警指标改 PCT_SELECTED_BASES（(ON_BAIT+NEAR_BAIT)/比对碱基，含±250bp 邻域）≥85% → TH-14 改挂 PCT_SELECTED_P1=85.0；③旧文档/注释"PCT_SELECTED(25-28%) 不得误读为捕获效率"废止——那是老 panel（区间长、26-40% 观测）时代的结论 | 同批新 panel 数据双流程交叉验证：本地 CollectHsMetrics 89.42/90.28/90.61% vs 外送 statistic.xls pct_selected_bases 89.59/90.38/90.72%（偏差<0.2pp，外送 reads 口径 Flank capture rate 85.7-87.3% 亦在阈值上方）——PCT_SELECTED 与产业侧"捕获率"直觉同口径；85% 留 ~4.5-5.6pp 裕量，捕获失败（杂交失败/错 panel）塌至 <20% 可有效区分；老 panel 数据（26-40%）不适用本阈值，已切换新 panel |
 | DEC-30 | **告警越界样本全点名（v2.20.0）**：check_fastp/check_flagstat/check_dup/check_capture 由"每指标只点名最差一个样本（_min_item/_max_item）"改为逐越界样本一行、名字序全点名（新辅助 `_violating`，方向参数 below/>）；例外：fastp 保留率 80-95% 提示带为 OK 级聚合一行点名（防提示刷屏）；批级指标（Ti/Tv、call rate、深度 CV）单值无点名问题；check_reads_low 本就逐样本；`_min_item` 保留用于指标播报（Step3 ELS 最小值） | RUN-43 复盘：260918 自测三样本 on-target 0.58/0.59/0.59 全部越界，钉钉只报"TG017 0.58%"一行——"每指标报最差"被代表性误读为"只有一个样本坏"，实为批性口径坍缩；全点名后告警行数上限=批内越界样本数×越界指标数，本仓库批次规模（2-13 样本）可控 |
+| DEC-31 | **非样本条目剔除 + 对照样本告警豁免 + 保留率提示带下调（v2.21.0）**：①scanner 布局识别后剔除 Illumina 下机自带的 Undetermined（BCLConvert 未匹配 index 的 reads；样本名不区分大小写等于 `undetermined` 即剔除，常量 `IGNORED_SAMPLES` 便于日后扩充）——独立 ignored 清单（INFO 日志 + run_summary `samples.ignored` 追溯），不算 invalid、不触发告警，杜绝其进入联合分型/基因型矩阵/Output 交付；②对照样本（`--exclude-samples`，默认 NTC）豁免样本级告警：check_reads_low 对低 reads 对照降级为 OK 级提示行逐个播报实际数值（低 reads 属阴性对照正常态），check_fastp（含提示带统计）/check_flagstat/check_dup/check_capture/check_recal_low/check_depth_cv 与 step2 内联 mapped<TH-05 P1 名单直接跳过对照（实验样本口径指标对对照无统计意义）；新参数均带默认值 `excluded=()`，NTC 仍走全流程 QC（mosdepth 深度供 TH-21 用）；污染监控不豁免，仍由 check_ntc（TH-21 靶区深度）与 check_ntc_reads（TH-34 占批次中位）专属口径负责；③TH-02 FASTP_RETENTION_WARN 95→90，提示带变为 TH-03~02 区间（80-90%） | RUN-45 实跑事故复盘：批次 260918 识别出 49 个"样本"（含 Undetermined 2300 万未匹配 index reads，一路进联合分型/矩阵/Output 污染整批，跑到 Step 3 手动中断）；Step1 钉钉 [P1] 两误报——NTC reads 32 被"上样不足"P1 误报（阴性对照 reads 近 0 属正常）、Undetermined 保留率 73.37% 被 P2 误报（样本级检查不感知 excluded 集合）；提示带把全部 49 样本点名一遍（实测保留率全批 92.18-94.47%，95 线对本 panel 定高失去区分度） |
 
 ## 5. 统一口径与阈值总表（TH = config.py 镜像）<!-- HUMAN 可改值；MACHINE 同步 config 后过校验 -->
 
@@ -174,7 +175,7 @@ cohort 级与 MultiQC 串行。样本失败即隔离（记入 failed，退出后
 | 编号 | config 键 | 值 | 语义 |
 | --- | --- | --- | --- |
 | TH-01 | FASTP_LENGTH_REQUIRED | 36 | fastp 最短读长（笔记） |
-| TH-02 | FASTP_RETENTION_WARN | 95.0 | 保留率<95% 提示 |
+| TH-02 | FASTP_RETENTION_WARN | 90.0 | 保留率<90% 提示（与 TH-03 构成 80-90% 提示带）。v2.21.0/DEC-31 由 95 下调：260918 批次实测全批 92.18-94.47%（本 panel + `-l 36` 修剪口径正常基线），95 线致提示带全批点名失去区分度 |
 | TH-03 | FASTP_RETENTION_P1 | 80.0 | 保留率<80% → P2 |
 | TH-04 | FASTP_Q30_P1 | 85.0 | Q30<85% → P2 |
 | TH-05 | MAPPED_MIN_PCT | 90.0 | mapped<90% → P1 报错不中断（QC 口径） |
@@ -221,12 +222,12 @@ cohort 级与 MultiQC 串行。样本失败即隔离（记入 failed，退出后
 | Step 1-6 间 · 磁盘复查 | Step 结束时剩余 < TH-24 → 终止批次 | P0 |
 | Step 0 · 合并失败 | cat 非 0（样本终止，其余照常） | P1 |
 | Step 1-6 · 执行失败 | 任一步 exit≠0 / 产物 0 字节（样本级隔离，不中断批次） | P1 |
-| Step 1 · 上样量 | 样本 reads 绝对量 < TH-33 | P1 |
+| Step 1 · 上样量 | 样本 reads 绝对量 < TH-33（对照样本降级 OK 级提示行播报实际数值，DEC-31） | P1 |
 | Step 2 · QC 口径 | mapped < TH-05（报错不中断） | P1 |
 | Step 6 · 空交付 | per-sample PASS 裁决 VCF 0 条记录 | P1 |
 | Step 6 · 对照污染 | NTC 靶区深度 > TH-21 | P1 |
 | 全流程 · 失败样本 | 任一样本在某步失败（汇总报错） | P1 |
-| Step 1 · 修剪 | fastp 保留率 <TH-03 或 Q30 <TH-04（TH-02~03 区间为提示行） | P2 |
+| Step 1 · 修剪 | fastp 保留率 <TH-03 或 Q30 <TH-04（TH-02~03 区间为提示行）；**样本级检查一律豁免对照样本（excluded），污染监控仅由 TH-21/TH-34 专属口径负责（DEC-31）** | P2 |
 | Step 1 · NTC reads | NTC reads 占批次中位样本 > TH-34 | P2 |
 | Step 2 · 比对 | mapped <TH-06 或 properly paired <TH-07 | P2 |
 | Step 3 · 去重 | 重复率 > TH-09（建库复杂度告急） | P2 |
@@ -427,6 +428,7 @@ CI（.github/workflows/ci.yml）在 py3.10/3.12 矩阵执行。
 | 2.19.0 | 2026-09-18 | 机 | DEC-29：config.ON_TARGET_P1→PCT_SELECTED_P1(85.0)+版本 2.19.0；alerts.check_capture 三参改 pct_selected（文案"捕获效率 PCT_SELECTED"）；run_pipeline 增存 metrics.pct_selected、里程碑通知"捕获效率(selected)"、check_capture 传参换新指标（on_target_pct 保留为信息指标）；gatk.qc_hsmetrics 增 PCT_SELECTED<85 WARN、日志重排（on-target 标注信息口径）、废止旧"PCT_SELECTED 不得误读为捕获效率"注释；report 指标表加捕获效率列；check_design mirrored 集合同步；测试改写 test_capture（134 全绿）；RUN-43 |
 | 2.20.0 | 2026-09-18 | 人 | 告警点名规则改为"越界样本全点名"：每指标只报最差一个样本的设计在 260918 自测中造成误读（三样本 on-target 全部越界只报 TG017 一行，被读成"只有一个样本坏"），要求全部越界样本逐个点名 |
 | 2.20.0 | 2026-09-18 | 机 | DEC-30：alerts 新增 `_violating(d, threshold, below)`（名字序越界样本列表），check_fastp/check_flagstat/check_dup/check_capture 全部改为逐越界样本一行；fastp 保留率 80-95% 提示带改 OK 级聚合一行点名；`_max_item` 删除（无引用），`_min_item` 保留（Step3 ELS 播报）；模块 docstring 增点名规则段；测试 134→136（fastp 全点名/带内聚合锚、capture RUN-43 复盘锚：三样本 PCT_SELECTED 两越界两行、未越界不点名）；RUN-44 |
+| 2.21.0 | 2026-09-18 | 机 | DEC-31（RUN-45 事故修复）：①scanner 剔除 Undetermined（`IGNORED_SAMPLES`，不区分大小写）——`ScanResult` 二元组兼容解包 + `.ignored` 清单，step0 记 INFO 日志并写 `samples.ignored`；②对照样本豁免样本级告警：check_reads_low 低 reads 对照降级 OK 级提示行播报实际数值（新增 `excluded` 参数），check_fastp/check_flagstat/check_dup/check_capture/check_recal_low/check_depth_cv 跳过对照（新辅助 `_only_samples`），step2 内联 mapped<TH-05 P1 名单同步跳过，run_pipeline 各调用处传入 `self.excluded`；污染监控仍由 check_ntc/check_ntc_reads 负责；③TH-02 FASTP_RETENTION_WARN 95→90（260918 实测全批 92.18-94.47%，95 线全批点名失去区分度），提示带变 80-90%；测试 136→143（Undetermined 剔除/大小写锚、reads 低对照降级 OK 含数值/多对照逐个点名/默认参数旧行为锚、fastp/depth_cv 豁免跳过锚、提示带 90 阈值锚——93% 不再进带、85% 仍在带）；README §6.3/§7 同步 |
 
 ## 11. 证据索引 <!-- MACHINE -->
 
