@@ -268,29 +268,77 @@ class TestEnterpriseSend(unittest.TestCase):
             for zp in made:     # 临时包已随 tmp 目录清理
                 self.assertFalse(os.path.exists(zp))
 
-    def test_send_zip_dir_oversize_skips_file_not_message(self):
-        """zip 超 20MB → 文件卡片跳过（WARN），说明消息照发、不中断"""
-        sent = []
+    def test_send_zip_dir_oversize_splits_volumes(self):
+        """★ >20MB → 分卷压缩发送（DEC-27，RUN-41）：每卷独立合法 zip、体积 ≤ 上限、
+        partNNofMM 命名；说明消息点名卷数与"解压到同一目录"合并方法；
+        单卷装不下的文件点名跳过（提示到服务器取）"""
+        sent_md, sent_files, vol_files = [], [], set()
 
         def fake_send_markdown(title, text, logger=None):
-            sent.append(text)
+            sent_md.append(text)
+            return True, None
+
+        def fake_send_file(path, logger=None):
+            self.assertLessEqual(os.path.getsize(path), 200 * 1024)  # 每卷 ≤ 上限
+            with zipfile.ZipFile(path) as zf:                         # 每卷是合法 zip
+                self.assertIsNone(zf.testzip())
+                vol_files.update(zf.namelist())
+            sent_files.append(os.path.basename(path))
             return True, None
 
         with tempfile.TemporaryDirectory() as td:
             ddir = os.path.join(td, "B_20260101")
             os.makedirs(ddir)
-            open(os.path.join(ddir, "a"), "wb").write(b"x")
+            blob = os.urandom(64 * 1024)          # 随机不可压 → zip 体积 ≈ 文件和
+            for i in range(4):                    # 4×64KB，预算 190KB → 每卷 2 文件
+                open(os.path.join(ddir, f"f{i}.bin"), "wb").write(blob)
+            open(os.path.join(ddir, "huge.bin"), "wb").write(os.urandom(200 * 1024))
+            log = _Log()
+            with mock.patch.object(dingtalk, "_configured", return_value=True), \
+                    mock.patch.object(dingtalk, "send_markdown",
+                                      side_effect=fake_send_markdown), \
+                    mock.patch.object(dingtalk, "send_file",
+                                      side_effect=fake_send_file), \
+                    mock.patch.object(dingtalk, "FILE_SIZE_LIMIT", 200 * 1024):
+                ok, _ = dingtalk.send_zip_dir(ddir, "t", "正文", logger=log)
+            self.assertTrue(ok)
+            self.assertEqual(sent_files, ["B_20260101_part01of02.zip",
+                                          "B_20260101_part02of02.zip"])
+            self.assertEqual(vol_files,
+                             {f"B_20260101/f{i}.bin" for i in range(4)})  # 无丢失无重复
+            self.assertIn("分 2 卷", sent_md[0])
+            self.assertIn("解压到同一目录", sent_md[0])
+            self.assertIn("huge.bin", sent_md[0])     # 单卷装不下 → 消息点名
+            self.assertTrue(any("分卷" in m for lv, m in log.lines if lv == "warn"))
+
+    def test_send_zip_dir_volume_cap_falls_back(self):
+        """★ 卷数超 MAX_VOLUMES → 回落纯说明消息（钉钉 20 条/分钟限流防刷屏），
+        一个文件卡片都不发"""
+        sent_md = []
+
+        def fake_send_markdown(title, text, logger=None):
+            sent_md.append(text)
+            return True, None
+
+        with tempfile.TemporaryDirectory() as td:
+            ddir = os.path.join(td, "B_20260101")
+            os.makedirs(ddir)
+            blob = os.urandom(64 * 1024)
+            for i in range(4):
+                open(os.path.join(ddir, f"f{i}.bin"), "wb").write(blob)
             log = _Log()
             with mock.patch.object(dingtalk, "_configured", return_value=True), \
                     mock.patch.object(dingtalk, "send_markdown",
                                       side_effect=fake_send_markdown), \
                     mock.patch.object(dingtalk, "send_file") as sf, \
-                    mock.patch.object(dingtalk, "FILE_SIZE_LIMIT", 1):
+                    mock.patch.object(dingtalk, "FILE_SIZE_LIMIT", 200 * 1024), \
+                    mock.patch.object(dingtalk, "MAX_VOLUMES", 1):
                 ok, _ = dingtalk.send_zip_dir(ddir, "t", "正文", logger=log)
             self.assertTrue(ok)
             sf.assert_not_called()
-            self.assertTrue(any("20MB" in m for lv, m in log.lines if lv == "warn"))
-            self.assertIn("超限", sent[0])     # 说明消息带超限提示
+            self.assertIn("超限", sent_md[0])
+            self.assertTrue(any("卷数超上限" in m for lv, m in log.lines
+                                if lv == "warn"))
 
 
 if __name__ == "__main__":

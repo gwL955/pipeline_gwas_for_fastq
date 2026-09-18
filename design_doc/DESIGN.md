@@ -3,7 +3,7 @@
 ```yaml
 # ---- design-meta（机器可解析锚点，勿手改格式；版本规则见 §0）----
 doc: GWAS-pipeline-design
-version: 2.16.0
+version: 2.17.0
 updated: 2026-09-18
 owner_human: gewenlong
 owner_machine: ZCode(GLM)
@@ -154,9 +154,10 @@ cohort 级与 MultiQC 串行。样本失败即隔离（记入 failed，退出后
 | DEC-21 | **三级分级体系**：P0=阻断级（严重影响分析→raise 中断批次，退出码 1）；P1=严重（执行失败样本隔离/NTC 污染/mapped<90，报错不中断）；P2=质量提示（阈值越界/口径存疑，只记录）。质量类一律不中断 | 用户决定：P0 应为严重影响分析的阻断级；质量只报错不中断（RUN-33） |
 | DEC-22 | **审计项落地**：P0 Step 间磁盘复查（disk_guard）；P1 reads<1M、PASS 裁决 VCF 空结果；P2 NTC reads 占比/批次深度 CV/recal 观测数（TH-33~36） | RUN-33 审计清单经用户圈选实施（RUN-34） |
 | DEC-23 | **输入布局识别器独立函数化**：每式布局一个 `scan_*` 函数（统一签名 `flat, subdirs → {样本: SampleInfo}`）登记于 `LAYOUT_SCANNERS` 依序应用——先认者优先、同名冲突记无效、不匹配任何布局的文件忽略；新增输入格式只追加函数不改 `scan_batch` 主体。v2.12.0 起三种布局：Illumina 平铺（样本名=去 `_S#_L###_R[12]_001` 尾）、外送子目录（样本名=子目录名）、**外送平铺（样本名=去 `_R[12]` 尾，RUN-36 新增）** | 外送交付常直接平铺于批次目录，此前两种识别器都不认 → 整批"无有效样本"静默跳过且无原因可查（RUN-36 事故）；识别器与 Illumina 式整名锚定互斥（结尾 `_R#.fastq.gz` 与 `_001.fastq.gz` 不可能兼得） |
-| DEC-24 | **钉钉通知企业机器人化 + 交付文件推送（v2.15.0）**：webhook 机器人不能发文件，切换为企业内部应用机器人（v1.0 `groupMessages/send` + oapi `media/upload`，参考实现 dingtalk_test/dingtalk_bot.py）。凭证四键入 .env（CLIENT_ID/SECRET/ROBOT_CODE/CONVERSATION_ID），未配置降级语义不变；**交付推送：批次全部结束后**（多批次不逐批推，防通知淹没）逐成功批次把 `Output/<批次>_<日期>/` 打包临时 zip → 说明消息 + sampleFile 文件卡片 → 清理；zip 硬限制 ≤20MB/后缀白名单（超限只发说明消息提示到服务器取）；`--notify-test` 增加 markdown+文件双链路验证；发送失败只降级 WARN 不影响退出码 | 用户更换企业机器人并要求交付文件推送钉钉（RUN-39）；文件卡片白名单不含 vcf/html → 必须打包 zip |
+| DEC-24 | **钉钉通知企业机器人化 + 交付文件推送（v2.15.0）**：webhook 机器人不能发文件，切换为企业内部应用机器人（v1.0 `groupMessages/send` + oapi `media/upload`，参考实现 dingtalk_test/dingtalk_bot.py）。凭证四键入 .env（CLIENT_ID/SECRET/ROBOT_CODE/CONVERSATION_ID），未配置降级语义不变；**交付推送：批次全部结束后**（多批次不逐批推，防通知淹没）逐成功批次把 `Output/<批次>_<日期>/` 打包临时 zip → 说明消息 + sampleFile 文件卡片 → 清理；zip 硬限制 ≤20MB/后缀白名单（超限→分卷发送，DEC-27）；`--notify-test` 增加 markdown+文件双链路验证；发送失败只降级 WARN 不影响退出码 | 用户更换企业机器人并要求交付文件推送钉钉（RUN-39）；文件卡片白名单不含 vcf/html → 必须打包 zip |
 | DEC-25 | **results/ 归档脚本（archive_results.py）**：扫描 `<批次>_<YYYYMMDD>` 目录，执行日期距今超 `--days`（默认 30）→ `7z a -t7z -mx=9 -mfb=192 -ms=on -md=256m -snl -mmt -sdel <dest.7z> <src>`（用户指定口径；-sdel=压缩成功后删源，失败自动保留）；输出 `GWAS_ARCHIVE_DIR`（默认 `$WORK/archive/`）；幂等（同名 .7z 已存在跳过）；`--dry-run` 只列不动；非批次命名目录跳过；离线维护工具，不属于流程运行时 | results/ 批次目录无限累积占盘（RUN-39 用户要求）；-sdel 把"删源"安全性交给 7z 自身语义 |
 | DEC-26 | **interval_list 生成参数收紧（v2.16.0）**：BedToIntervalList 固定 `--UNIQUE true --DROP_MISSING_CONTIGS true`——UNIQUE 把重叠/相邻区间合并为唯一区间（sorted.bed 的 `sort -u` 只去完全重复行，探针重叠需靠 UNIQUE 摊平；HsMetrics 靶区按唯一口径计深度，不因重叠虚增碱基数）；DROP_MISSING_CONTIGS 丢弃 bed 中序列字典（genome.dict，194 序列、无 ALT）不存在的 contig 而非 PicardException 中断 | 新 panel bed 按 GRCh38 完整版（含 ALT，如 chr22_KI270879v1_alt）制定，与比对参考不一致，首跑即 `Sequence not found` 中断（RUN-40）；实测重叠探针致靶区虚标 31310bp，唯一口径实为 18339bp |
+| DEC-27 | **交付超限分卷发送（v2.17.0）**：整包 zip >20MB 时不再只发说明消息——按文件分组打成多卷（`<批次>_partNNofMM.zip`，卷预算=上限 95%、每卷独立合法 zip），说明消息点名卷数与"全部下载解压到同一目录"合并方法，逐卷发文件卡片；单文件超卷预算点名跳过（消息提示到服务器取）；卷数超 `MAX_VOLUMES`（25，钉钉 20 条/分钟限流防刷屏）回落纯说明消息 | 钉钉文件白名单只认 xlsx/pdf/zip/rar/doc/docx，`.zip.001`/`.z01` 等真分卷后缀上传必被拒——每卷独立 zip 是白名单约束下"分卷压缩发送"的唯一可行实现（收方免 cat 合并）；大批次交付整包超 20MB 时此前只能弃发文件（RUN-41 用户要求） |
 
 ## 5. 统一口径与阈值总表（TH = config.py 镜像）<!-- HUMAN 可改值；MACHINE 同步 config 后过校验 -->
 
@@ -247,7 +248,7 @@ cohort 级与 MultiQC 串行。样本失败即隔离（记入 failed，退出后
 每批次：启动（样本数/输入体量/资源计划+预检结论）→ Step 0-6 每步里程碑 → 完成/失败；
 多批次另有总览。**交付文件推送（DEC-24，v2.15.0）：批次全部结束后逐成功批次
 `Output/<批次>_<日期>/` 打包 zip → 说明消息 + 文件卡片**（多批次统一发送防淹没；
-zip 超 20MB 只发说明消息）。`DINGTALK_MILESTONES=0` 只发异常级（P0/P1）。里程碑模板：
+zip 超 20MB → 分卷压缩多发，DEC-27）。`DINGTALK_MILESTONES=0` 只发异常级（P0/P1）。里程碑模板：
 
 ```
 [GWAS][P1] 20260720批次 · Step 2 比对完成
@@ -346,7 +347,7 @@ results/260422_20260914/                     Output/260422_20260914/
 | test_runner.py | tool 拼装/binds、cpath 映射、rt 绝对路径自包含解析、PATH 兜底、幂等 SKIP、dry-run 不执行、超时 kill、统计命令 timeout=600 传递 |
 | test_resource.py | sort -m 整数 MB、-Xmx 格式、low/high 档精确值、快速失败（mock 探测）、计划表、workers 覆盖 |
 | test_scanner.py | 三种布局、无效输入（R1R2 不匹配/0 字节）、布局互斥与同名冲突、md5（含外送平铺样本名推导）、合并（真实与 dry-run）、samples.tsv 列 |
-| test_dingtalk.py | 规范化纯函数（表格降级/换行/截断）；企业机器人链路（mock _request 不发网络）：groupMessages/send 请求结构、msgParam JSON 字符串、token 进程内缓存、未配置零网络+单次 WARN、文件后缀/20MB 校验、media/upload multipart+sampleFile、交付 zip 打包推送（超限跳文件不跳说明） |
+| test_dingtalk.py | 规范化纯函数（表格降级/换行/截断）；企业机器人链路（mock _request 不发网络）：groupMessages/send 请求结构、msgParam JSON 字符串、token 进程内缓存、未配置零网络+单次 WARN、文件后缀/20MB 校验、media/upload multipart+sampleFile、交付 zip 打包推送（≤20MB 单包）、**交付超限分卷（DEC-27：每卷独立合法 zip ≤ 上限/partNNofMM 命名/无丢失无重复/说明消息点名卷数与合并方法/单卷装不下的文件点名跳过/卷数超上限回落纯说明消息）** |
 | test_alerts.py | P0/P1/P2 三级判定全集（含 TH-33~36 新检查）、最差级别、里程碑模板 |
 | test_parsers.py | fastqc/fastp(json 真实结构)/markdup/hsmetrics/flagstat/stats/bcftools/mosdepth/recal 观测数 |
 | test_variant_post.py | 矩阵 `./.` 裁决、重建只换 GT、GT 列显式映射、norm outputs 口径 |
@@ -359,7 +360,7 @@ CI（.github/workflows/ci.yml）在 py3.10/3.12 矩阵执行。
 
 ### 9.2 迁移/重建验证顺序（DEC-12）
 
-1. `./run_tests.sh` 全绿（全部用例数见 §9.1 各文件，当前共 130）
+1. `./run_tests.sh` 全绿（全部用例数见 §9.1 各文件，当前共 131）
 2. `cp .env.example .env` 填 webhook → `python3 run_pipeline.py --notify-test`（连通性）
 3. `python3 run_pipeline.py --dry-run --batch <小批次>`（容器/参考文件/路径与资源计划）
 4. `python3 run_pipeline.py --resource-profile low --dry-run`（低配档口径）
@@ -367,7 +368,7 @@ CI（.github/workflows/ci.yml）在 py3.10/3.12 矩阵执行。
 
 ### 9.3 重建完成判据
 
-130 用例 + check_design 全绿；`--version` 输出与本文档 version 一致；dry-run 零落盘；
+131 用例 + check_design 全绿；`--version` 输出与本文档 version 一致；dry-run 零落盘；
 单批次实跑 success 且 Step 6 交付目录含 VCF+tbi+MultiQC，`md5sum -c` 全过。
 
 ## 10. 变更日志（CHANGELOG）<!-- 人机共写：每方改动各记一行 -->
@@ -414,6 +415,8 @@ CI（.github/workflows/ci.yml）在 py3.10/3.12 矩阵执行。
 | 2.15.0 | 2026-09-18 | 机 | DEC-24：dingtalk.py 重写（v1.0 群消息+oapi 媒体上传+token 缓存+文件卡片；凭证四键入 .env；notify/send_markdown 语义与降级不变）；run_pipeline 批次循环后逐 success 批次 send_zip_dir；--notify-test 加文件链路；DEC-25：archive_results.py（--days/--results/--out/--dry-run，幂等）；测试 115→128（企业链路 mock/归档四件套）；RUN-39（--notify-test 实发成功、真实交付 zip 3.8MB→1.7MB 推送成功、归档实测 -sdel 删源+幂等） |
 | 2.16.0 | 2026-09-18 | 人 | 更新靶区 bed 后 BedToIntervalList 中断（bed 按 GRCh38 完整版制定含 ALT contig，比对参考字典无）→ 丢字典外 contig；bed 含重叠/重复探针区间 → interval_list 去重合并，靶区按唯一口径计碱基 |
 | 2.16.0 | 2026-09-18 | 机 | DEC-26：BedToIntervalList 固定 --UNIQUE true --DROP_MISSING_CONTIGS true（sorted.bed 的 sort -u 只去完全重复行，相邻/重叠区间靠 UNIQUE 合并）；README §8 差异表增第 12 行；测试 128→130（参数锚+幂等跳过锚）；RUN-40（真实容器实测：12014 行 bed → 11972 唯一区间/18339bp，丢弃 4 个 ALT 1bp 区间） |
+| 2.17.0 | 2026-09-18 | 人 | 两项：①参考选择结论（比对参考用 genome/genome.fa 而非 bundle hg38.fa 的取舍分析）写入内部 README_pipeline.md；②钉钉交付 zip 超 20MB 不再只发说明消息，改为分卷压缩发送 |
+| 2.17.0 | 2026-09-18 | 机 | DEC-27：send_zip_dir 超限分支重写——_make_volumes 按卷预算（上限 95%）把交付文件分组打成多卷独立合法 zip（partNNofMM；白名单只认 zip 等五后缀，.zip.001 真分卷后缀必被拒），说明消息点名卷数与"解压到同一目录"合并方法，单卷装不下点名跳过，卷数>MAX_VOLUMES(25) 回落纯说明消息；run_pipeline 交付推送注释同步；参考选择分析写入 design_doc/README_pipeline.md（内部版，gitignored）§2.1；测试 130→131（分卷/卷数上限两用例，原超限用例改写）；RUN-41（真实分卷链路实发验证） |
 
 ## 11. 证据索引 <!-- MACHINE -->
 
@@ -422,7 +425,7 @@ CI（.github/workflows/ci.yml）在 py3.10/3.12 矩阵执行。
 | 运行台账（每轮） | pipeline/design_doc/RUN_HISTORY.md |
 | 验收运行（0_raw_data_test） | results/260422_20260914/、results/260422_20260916/ 等（运行日志在各批次 logs/） |
 | 交付 | Output/<批次>_<日期>/ + INDEX.md（累积） |
-| 测试集与 CI | pipeline/tests/（130 用例）+ run_tests.sh + .github/workflows/ci.yml |
+| 测试集与 CI | pipeline/tests/（131 用例）+ run_tests.sh + .github/workflows/ci.yml |
 | 使用说明/与笔记差异 | pipeline/README.md |
 | 环境参数 | pipeline/.env（密钥，600）+ pipeline/.env.example（模板） |
 | 命令参考快照 | pipeline/design_doc/notes_code_reference.md |

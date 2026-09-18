@@ -13,7 +13,8 @@ webhook 机器人不能发文件，交付产物推送需要「媒体上传 + sam
 
 官方硬限制：
   - msgParam 为 JSON 字符串且 ≤15000B → 正文截断 MAX_TEXT_BYTES 预留转义余量
-  - 文件消息 ≤20MB 且后缀限 xlsx/pdf/zip/rar/doc/docx → 交付目录打包 zip 即为此
+  - 文件消息 ≤20MB 且后缀限 xlsx/pdf/zip/rar/doc/docx → 交付目录打包 zip 即为此；
+    整包超 20MB 时分卷多发（每卷独立合法 zip，DEC-27——真分卷后缀不在白名单）
   - accessToken 有效期 7200s：进程内缓存、提前 5 分钟过期（频繁取 token 会被限流）
   - markdown 官方子集：不支持表格、单换行不生效 → normalize_markdown 三层规范化
   - 发送频率 20 条/分钟；发送失败只降级写日志，绝不中断分析流程
@@ -31,6 +32,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+import zipfile
 
 import config
 
@@ -44,6 +46,12 @@ MAX_TEXT_BYTES = 14000
 # 钉钉 type=file 媒体上传的硬限制（清单外格式一律失败，先包成 zip）
 ALLOWED_FILE_EXT = {".xlsx", ".pdf", ".zip", ".rar", ".doc", ".docx"}
 FILE_SIZE_LIMIT = 20 * 1024 * 1024   # 20MB
+
+# 交付超限分卷（DEC-27）：白名单只认 zip 等五种后缀，.zip.001/.z01 这类真分卷
+# 后缀上传必被拒 → 每卷打成独立合法 zip（partNNofMM 命名，收方全下后解压到
+# 同一目录即还原交付结构）。卷预算按上限 95%（压缩膨胀+zip 结构余量）；
+# 卷数超上限回落纯说明消息（钉钉 20 条/分钟限流，防文件卡片刷屏）
+MAX_VOLUMES = 25
 
 # webhook 未配置时只告警一次（notify 会被高频调用，避免逐条刷屏）
 _no_config_warned = False
@@ -306,10 +314,58 @@ def send_file(path, logger=None):
     return ok, err
 
 
+# ── 交付分卷（>20MB 时按卷拆多发，DEC-27）────────────────────────────────
+def _volume_budget():
+    """单卷文件体积预算（未压缩口径）：上限 95%，留压缩膨胀与 zip 结构余量"""
+    return max(FILE_SIZE_LIMIT * 19 // 20, 1)
+
+
+def _iter_delivery_files(directory):
+    """稳定顺序（目录名/文件名排序）枚举交付文件，arcname 保留顶层目录结构"""
+    root = os.path.abspath(directory)
+    base = os.path.basename(os.path.normpath(directory))
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames.sort()
+        for name in sorted(filenames):
+            full = os.path.join(dirpath, name)
+            yield full, os.path.join(base, os.path.relpath(full, root))
+
+
+def _make_volumes(directory, tmp):
+    """按卷预算把交付文件分组打成多卷独立 zip → (volumes, skipped)。
+    单文件超卷预算无法入卷 → skipped（说明消息点名，到服务器取）。
+    DEFLATE 压缩后体积 ≤ 存储和，卷预算按未压缩口径即保证每卷 ≤ 上限。"""
+    budget = _volume_budget()
+    groups, cur, cur_sz, skipped = [], [], 0, []
+    for full, arc in _iter_delivery_files(directory):
+        sz = os.path.getsize(full)
+        if sz > budget:
+            skipped.append(arc)
+            continue
+        if cur and cur_sz + sz > budget:
+            groups.append(cur)
+            cur, cur_sz = [], 0
+        cur.append((full, arc))
+        cur_sz += sz
+    if cur:
+        groups.append(cur)
+    stem = os.path.basename(os.path.normpath(directory))
+    volumes = []
+    for i, group in enumerate(groups, 1):
+        path = os.path.join(tmp, f"{stem}_part{i:02d}of{len(groups):02d}.zip")
+        with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
+            for full, arc in group:
+                zf.write(full, arc)
+        volumes.append(path)
+    return volumes, skipped
+
+
 def send_zip_dir(directory, title, text, logger=None):
     """目录打包 zip → 先发说明消息再发文件（两条独立消息）→ 清理临时包。
     交付推送入口（DEC-24）：zip 后缀/20MB 限制由 file_reject_reason 把关，
-    超限只 WARN 跳过文件、说明消息照发；任何失败不中断流程。"""
+    整包超限 → 分卷多发（DEC-27：每卷独立合法 zip ≤ 上限，说明消息点名卷数
+    与合并方法；单文件超卷预算点名跳过；卷数超 MAX_VOLUMES 回落纯说明消息）；
+    任何失败不中断流程。"""
     if not _configured():
         return False, _no_config_err()
     tmp = tempfile.mkdtemp(prefix="gwas_delivery_")
@@ -320,10 +376,28 @@ def send_zip_dir(directory, title, text, logger=None):
         size_mb = os.path.getsize(zip_path) / 1048576
         reason = file_reject_reason(zip_path)
         if reason:
+            volumes, skipped = _make_volumes(directory, tmp)
+            if not volumes or len(volumes) > MAX_VOLUMES:
+                if logger:
+                    logger.warn(f"交付 zip 不发送文件卡片：{reason}（分卷不可用："
+                                f"{'卷数超上限 ' + str(MAX_VOLUMES) if volumes else '无有效文件'}）")
+                return send_markdown(title, text + f"\n\n> 交付 zip {size_mb:.1f}MB 超限，"
+                                     "文件请到服务器 Output/ 目录获取", logger=logger)
             if logger:
-                logger.warn(f"交付 zip 不发送文件卡片：{reason}")
-            return send_markdown(title, text + f"\n\n> 交付 zip {size_mb:.1f}MB 超限，"
-                               "文件请到服务器 Output/ 目录获取", logger=logger)
+                logger.warn(f"交付 zip {size_mb:.1f}MB 超限，改分卷发送（{len(volumes)} 卷）")
+            note = (f"\n\n> 交付 zip {size_mb:.1f}MB 超钉钉单文件 20MB 上限，"
+                    f"已分 {len(volumes)} 卷发送——**全部下载后解压到同一目录**即还原交付结构")
+            if skipped:
+                note += ("\n\n> ⚠️ 以下文件单卷装不下未发送，请到服务器 Output/ 获取："
+                         + "、".join(skipped))
+            ok1, err1 = send_markdown(title, text + note, logger=logger)
+            results = [send_file(v, logger=logger) for v in volumes]
+            if logger:
+                logger.info(f"交付分卷推送完成: {len(volumes)} 卷 "
+                            f"{sum(1 for o, _ in results if o)}/{len(volumes)} 成功"
+                            f"（markdown={'OK' if ok1 else err1}）")
+            return all(o for o, _ in results) and ok1, \
+                next((e for e in [err1] + [err for _, err in results] if e), None)
         ok1, err1 = send_markdown(title, text, logger=logger)
         ok2, err2 = send_file(zip_path, logger=logger)
         if logger:

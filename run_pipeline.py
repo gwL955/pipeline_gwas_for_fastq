@@ -1339,9 +1339,10 @@ def main():
         if last_summary_path and not args.dry_run:
             report_mod.write_run_summary(summary, last_summary_path)
 
-    # 交付文件打包推送钉钉（DEC-24，v2.15.0）：**批次全部结束后统一发送**——
-    # 多批次逐批推会被通知淹没；每个 success 批次的 Output 交付目录 → 临时 zip
-    # （钉钉文件卡片仅支持 zip 等白名单后缀且 ≤20MB）→ 说明消息 + 文件卡片。
+    # 交付文件打包推送钉钉（DEC-24，v2.15.0；分卷 DEC-27，v2.17.0）：
+    # **批次全部结束后统一发送**——多批次逐批推会被通知淹没；每个 success 批次的
+    # Output 交付目录 → 临时 zip（钉钉文件卡片仅支持 zip 等白名单后缀且 ≤20MB；
+    # 超限自动分卷：每卷独立合法 zip ≤20MB，逐卷发卡片）→ 说明消息 + 文件卡片。
     # 发送失败只降级 WARN（通知链路问题不影响分析结果与退出码）
     if args.notify == "on" and not args.dry_run:
         for batch, d in sorted(summary["batches"].items()):
