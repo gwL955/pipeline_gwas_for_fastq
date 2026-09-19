@@ -7,6 +7,10 @@ workers × 每样本线程 × sort/GATK 内存推导。覆盖 16 线程/20G ~ 10
   探测 cpu/mem → 预留（2 核 + max(2G, 5% 内存)）→ 按核数分档定每样本线程 T 与
   workers(核) → 按内存收紧 workers（单样本峰值 = 索引 17G + T×sort缓冲 + GATK + 杂项）
   → 反推 SORT_MEM（128M-2G 钳位）与 GATK_MEM（1g-8g 钳位）
+  → 按步骤类型分化 workers（DEC-35）：比对类沿用 workers（bwa 索引峰值口径）；
+  GATK 单线程类 workers_gatk（每路峰值 1.3×gatk 堆、不含 bwa 索引）；
+  IO 类 workers_io（fastp/fastqc/md5/合并，每路 ~2G）；HC hmm 线程反推保证
+  workers_gatk×hmm ≤ usable_cores（防超订阅）
   → 快速失败：workers=1 时峰值仍 > 可用内存则报错退出（防跑到一半 OOM）。
 """
 
@@ -15,6 +19,10 @@ import math
 import json
 
 import config
+
+# ── 步骤类型分化的推导常量（DEC-35，非告警阈值故不入 config TH 表） ──────
+GATK_MEM_OVERHEAD = 1.3   # GATK 每 worker 实际峰值 ≈ 堆×1.3（JVM 元空间/GC/IO 开销）
+IO_WORKER_PEAK_GB = 2.0   # IO 类每路峰值：fastqc JVM ~1G + fastp 缓冲（FASTP_BUF_GB）
 
 
 # ── 探测 ────────────────────────────────────────────────────────────────
@@ -118,7 +126,7 @@ class ResourcePlan:
         return d
 
     def table(self):
-        """计划透明：探测值→预留→workers/T/SORT_MEM/GATK_MEM 完整推导表"""
+        """计划透明：探测值→预留→各类 workers/T/SORT_MEM/GATK_MEM 完整推导表"""
         lines = [
             "─── 资源计划（resource plan）───",
             f"  profile           : {self.profile}",
@@ -126,17 +134,26 @@ class ResourcePlan:
             f"  系统预留          : {self.reserve_cores} 核 + {self.reserve_mem_gb} GB",
             f"  可用(扣预留)      : {self.usable_cores} 线程 / {self.usable_mem_gb} GB",
             f"  每样本线程 T      : {self.threads}",
-            f"  workers(核推导)   : {self.workers_cpu} ; workers(内存推导): {self.workers_mem}"
-            f" → 取较小 = {self.workers}",
+            f"  workers 比对类    : 核 {self.workers_cpu} ; 内存 {self.workers_mem}"
+            f" → 取较小 = {self.workers}（Step2 bwa，索引 17G 峰值口径）",
+            f"  workers GATK 类   : 核 {self.workers_gatk_cpu} ; 内存 {self.workers_gatk_mem}"
+            f" → 取较小 = {self.workers_gatk}（Step3/4/5-HC/6，"
+            f"每路 ~{self.gatk_peak_gb} GB = {GATK_MEM_OVERHEAD}×{self.gatk_mem}，不含 bwa 索引）",
+            f"  workers IO 类     : {self.workers_io}（Step0/1 md5·合并·fastp·fastqc，"
+            f"每路 ~{IO_WORKER_PEAK_GB} GB，≤ GATK 类）",
             f"  sort -m(每线程)   : {self.sort_mem}",
             f"  GATK -Xmx         : {self.gatk_mem}",
             f"  bwa/fastp/fastqc  : -t {self.threads} / --thread {self.fastp_threads} / -t {self.fastqc_threads}",
-            f"  HC pair-hmm 线程  : {self.hc_hmm_threads} ; mosdepth -t {self.mosdepth_threads}",
+            f"  HC pair-hmm 线程  : {self.hc_hmm_threads}"
+            f"（GATK 类 {self.workers_gatk}×{self.hc_hmm_threads} ≤ 可用 {self.usable_cores} 核，防超订阅）"
+            f" ; mosdepth -t {self.mosdepth_threads}",
             f"  cohort 步骤 -Xmx  : {self.cohort_mem}（串行，可用内存 60% 钳位）",
             f"  单样本峰值内存    : {self.peak_per_sample_gb} GB（bwa 索引 {config.BWA_INDEX_MEM_GB}G"
             f" + {self.threads}×{self.sort_mem} + {self.gatk_mem} + 杂项 {config.FASTP_BUF_GB}G）",
-            f"  预计总占用        : {self.workers} × {self.peak_per_sample_gb} = "
-            f"{round(self.workers * self.peak_per_sample_gb, 1)} GB / 可用 {self.mem_detected} GB",
+            f"  预计总占用        : 比对 {self.workers} × {self.peak_per_sample_gb} = "
+            f"{round(self.workers * self.peak_per_sample_gb, 1)} GB ; GATK 类 {self.workers_gatk} × "
+            f"{self.gatk_peak_gb} = {round(self.workers_gatk * self.gatk_peak_gb, 1)} GB"
+            f" / 可用 {self.mem_detected} GB",
         ]
         return "\n".join(lines)
 
@@ -192,8 +209,26 @@ def plan(profile="auto", workers_override=None, threads_override=None,
 
     peak = round(config.BWA_INDEX_MEM_GB + T * sort_mb / 1024 + gatk_gb + config.FASTP_BUF_GB, 1)
 
+    # ── 按步骤类型分化 workers（DEC-35）────────────────────────────────
+    # 实测瓶颈：GATK 单线程工具（MarkDuplicates/BQSR/HC/HsMetrics）以比对类
+    # workers 并行时整机 CPU ~10%（比对类 workers 被每路 17G bwa 索引峰值钉死）；
+    # GATK 阶段索引不在工作集，每路峰值 ≈ 1.3×gatk 堆。
+    # 比对类（Step2）：沿用 workers（bwa 饱和设计，96% CPU，勿动）；
+    # GATK 类（Step3/4/5-HC/6）：CPU 每路预算 max(2, hmm 档) 核（hmm 线程 +
+    #   JVM GC/IO 余量）——50 核机 48//4=12 路 × hmm4 = 48 核满载不超订；
+    # IO 类（Step0 md5/合并、Step1 fastp/fastqc）：每路 ~2G，至多与 GATK 类同路
+    #   （收益递减且压缩线程挤占）。
+    hmm_tier = min(4, max(1, T // 2))          # 期望档：与现行口径一致（T=12→4，T=4→2）
+    gatk_peak = round(GATK_MEM_OVERHEAD * gatk_gb, 1)
+    workers_gatk_cpu = max(1, usable_cores // max(2, hmm_tier))
+    workers_gatk_mem = max(1, int(usable_mem // gatk_peak))
+    workers_gatk = min(workers_gatk_cpu, workers_gatk_mem)
+    workers_io = max(1, min(int(usable_mem // IO_WORKER_PEAK_GB), workers_gatk))
+
     if workers_override:
-        workers = max(1, int(workers_override))
+        workers = workers_gatk = workers_io = max(1, int(workers_override))
+    # HC hmm 反推（防超订阅）：workers_gatk×hmm ≤ usable_cores；档位不超过期望档
+    hc_hmm = min(hmm_tier, max(1, usable_cores // workers_gatk))
 
     # 快速失败：单样本峰值装不下（如机器不足 20G 装不下 bwa-mem2 人类索引）
     if peak > mem_det:
@@ -210,6 +245,10 @@ def plan(profile="auto", workers_override=None, threads_override=None,
             print(warn, flush=True)
         else:
             workers = max(1, int(mem_det // peak))
+    # GATK 类同口径兜底（仅用户覆盖可能越界；自动路径已由 min 收紧）
+    if workers_gatk * gatk_peak > mem_det and workers_override:
+        print(f"[WARN] --workers={workers_gatk} 的 GATK 类超出内存预算："
+              f"{workers_gatk}×{gatk_peak} GB > {mem_det} GB，存在 OOM 风险", flush=True)
 
     cohort_gb = int(round(0.6 * mem_det))
     cohort_gb = max(config.COHORT_MEM_MIN_GB, min(config.COHORT_MEM_MAX_GB, cohort_gb))
@@ -221,10 +260,13 @@ def plan(profile="auto", workers_override=None, threads_override=None,
         usable_cores=usable_cores, usable_mem_gb=usable_mem,
         threads=T, workers=workers,
         workers_cpu=workers_cpu, workers_mem=workers_mem,
+        workers_gatk=workers_gatk, workers_io=workers_io,
+        workers_gatk_cpu=workers_gatk_cpu, workers_gatk_mem=workers_gatk_mem,
+        gatk_peak_gb=gatk_peak,
         sort_mem=f"{sort_mb}M",   # samtools 只接受整数+单位（2.0G 会被误解析为 2 字节）
         gatk_mem=f"{gatk_gb}g",
         fastp_threads=min(16, T), fastqc_threads=min(8, max(2, T // 3)),
-        hc_hmm_threads=min(4, max(1, T // 2)), mosdepth_threads=min(8, max(2, T // 3)),
+        hc_hmm_threads=hc_hmm, mosdepth_threads=min(8, max(2, T // 3)),
         cohort_mem=f"{cohort_gb}g",
         peak_per_sample_gb=peak,
     )

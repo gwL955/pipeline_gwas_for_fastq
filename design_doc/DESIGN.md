@@ -3,7 +3,7 @@
 ```yaml
 # ---- design-meta（机器可解析锚点，勿手改格式；版本规则见 §0）----
 doc: GWAS-pipeline-design
-version: 2.23.1
+version: 2.24.0
 updated: 2026-09-19
 owner_human: gewenlong
 owner_machine: ZCode(GLM)
@@ -127,8 +127,13 @@ sorted.bed/interval_list 与 bed 同目录生成；sorted.bed 按 genome.dict �
 | **6 汇总与交付** | mosdepth×2（markdup/BQSR bam）→ `CollectHsMetrics`（BQSR bam）→ **矩阵 `./.` 裁决**（mosdepth bqsr regions 深度 DP≥TH-15 改判 0/0）→ 每样本 PASS VCF 重建（`view -s` + GT 替换，其余字段原样）→ **MultiQC 最终报告（此时全部流程结束、QC 齐全）** → 交付导出 Output/ | `qc/mosdepth|hs metrics|multiqc`、`matrix/genotype_matrix.adjudicated.tsv`、`per_sample_vcf/<样本>.PASS.adjudicated.vcf.gz(+.tbi)`、`Output/<批次>_<日期>/` 全套 | P1：PASS 裁决 VCF 0 记录（交付为空）、NTC 靶深>10×（TH-21）；P2：捕获效率 PCT_SELECTED<85/depth<50/20X<95/Ti-Tv<2.0/call rate<95（TH-14/11/13/22/23）、批次深度 CV>0.5（TH-35） |
 | 每步之后 | `disk_guard`：Step 间磁盘复查 | — | P0：剩余<DISK_MIN_FREE_GB 立即终止批次（TH-24） |
 
-并行模型：Step 1-4 与 Step 6 的样本级任务按 `plan.workers` 线程池并行；Step 5 的
-cohort 级与 MultiQC 串行。样本失败即隔离（记入 failed，退出后续步骤，P1 通知）。
+并行模型（DEC-35 按步骤类型分化 workers）：Step 2 比对按 `plan.workers`（每路含
+17G bwa 索引峰值、T 线程饱和设计）；Step 3/4/5-每样本 HC/6 按 `plan.workers_gatk`
+（GATK 单线程类，每路峰值 ≈1.3×gatk 堆、不含 bwa 索引）；Step 0 md5/合并与
+Step 1 fastp/fastqc 按 `plan.workers_io`（每路 ~2G，≤GATK 类）；Step 5 的 cohort 级、
+Step 6 的矩阵裁决/每样本重建与 MultiQC 串行。HC `--native-pair-hmm-threads` 满足
+`workers_gatk×hmm ≤ usable_cores`（防超订阅）。样本失败即隔离（记入 failed，
+退出后续步骤，P1 通知）。`--workers` 覆盖时三类同步生效（hmm 随之反推）。
 
 ## 4. 关键设计决策（DEC）<!-- MACHINE 回写；人可新增决策行（含动机） -->
 
@@ -166,6 +171,7 @@ cohort 级与 MultiQC 串行。样本失败即隔离（记入 failed，退出后
 | DEC-32 | **指标播报对照豁免 + ELS 统计扩容 + 步骤总数播报（v2.22.0）**：①里程碑与全流程汇总"指标:"行的**样本级指标均值一律排除对照**（`_avg(d, excluded)`：Step2 mapped/pp、Step3 dup、Step6 depth/20X/捕获效率、完成通知质量行）——DEC-31 只豁免了告警点名，播报均值此前仍含 NTC（reads 近 0 拉低批均值）；②Step3 ELS 播报由"ELS 最小 <值>"扩为**均值/方差/最低值+对应样本**三元组（新 `alerts.els_summary(els, excluded)`，科学计数法，方差取总体方差÷n 与深度 CV 同口径），排除对照——NTC 的 ELS 无统计意义且必然占据最低值（曾被误读为"文库复杂度不足"）；`_min_item` 删除（无引用）；③里程碑标题尾部增**"（共 X 步）"**（`step_milestone(total_steps=)`，X=args.step：**Step 0 为清点预备步不计入，全流程=6**——首版误用 args.step+1 显示 7，RUN-47 依用户口径修正）；④例外：Step1 里程碑 fastp 保留率/Q30 均值保留含对照原口径（修剪口径对对照同样成立，reads 已由 DEC-31 OK 提示行专属播报）；对照清单写入 run_summary `samples.excluded` | RUN-46 用户复盘：Step3 钉钉"ELS 最小"被 NTC 的极小 ELS 占据（阴性对照 reads 近 0 → 文库复杂度误判），并要求检查其余步骤同类误报——排查结论：Step2 mapped/pp、Step3 dup、Step6 depth/20X/捕获效率与全流程完成通知的质量均值行同样含 NTC 失真（均已修）；Step4 播报为流程健康度计数、Step5 为 cohort 级（对照已排除出 calling）、Step0 无样本级均值，不受影响 |
 | DEC-33 | **后台运行 SIGHUP 全链路防护（v2.23.0）**：①`run_pipeline.main()` 启动即 `signal(SIGHUP, SIG_IGN)`（代码级 nohup，未套 nohup 的后台启动同样免疫，SIG_IGN 经 fork/exec 继承覆盖 sh/singularity/bcftools/bwa 等全部非 JVM 子进程；控制台写失败由 TeeStream 兜底只落盘）；②GATK 全部 10 类命令 `--java-options "-Xrs -Xmx…"`——JVM 启动时对 SIGHUP 安装自己的处理器，**覆盖 nohup 继承来的忽略位**（nohup 跑 Java 的经典坑），`-Xrs` 后 JVM 不装信号处理器、继承位得以保留；③fastqc 同为 JVM 但启动器不收 `--java-options` → 命令前缀 `_JAVA_OPTIONS=-Xrs` 注入（singularity 默认透传宿主环境进容器；代价：每条命令 stderr 多一行 "Picked up" 提示）；④`-Xrs` 代价：SIGQUIT/SIGTERM 优雅停机与 kill -3 线程转储不可用（排障改用 `jcmd Thread.print`）——流程超时兜底本就 SIGKILL、无依赖 shutdown hooks 的中间产物，无影响 | RUN-48 外部服务器实跑事故：`nohup python3 run_pipeline.py … &` 启动，00:57:42 关闭启动命令所在终端（WSL2 下关 Windows Terminal 标签页）→ 4 个正在跑 HC 的 JVM 同瞬打印 "Hangup" 以 exit=129（=128+SIGHUP）退出；后续顶上来的 worker 与全部 MT 样本无一失败（数据/流程本身无问题，纯外部信号事件）；4 样本缺 gVCF → 批次 partial → 交付 zip 推送被拦（DEC-24 口径：仅 success 批次自动推送，属有意设计） |
 | DEC-34 | **Step5 失败连锁修复 + cohort 复跑守卫（v2.23.0）**：①每样本 hardfiltered/PASS 拆分（`view -s`）名单改用**实际进入 cohort 的 hc_ok**——曾误用 HC 失败前的原始 calling，失败样本不在 cohort VCF 头里，`bcftools view -s` 连锁报"样本不存在"（exit=255）；②**cohort 复跑守卫**：gvcf.list 重新生成后，读现存关键 VCF（cohort.g.vcf.gz / cohort.PASS.vcf.gz）header 样本清单与本次 hc_ok 比对（DEC-05 sorted 同口径），不一致即作废 cohort/matrix/per_sample_vcf 全部派生产物重算（均可在链上重算，REQ-04；dry-run / header 不可读 → 不判不作废零副作用）；**RUN-49 补漏：qc/bcftools_stats/cohort.*.stats 与 qc/multiqc/ 一并作废（multiqc_data/ 子目录整树删）——run_stats 按产物非空幂等、run_multiqc 按报告存在幂等，不删则陈旧 Ti/Tv 统计与陈旧 MultiQC 报告被 SKIP 沿用进通知与交付** | RUN-48 连锁复盘：拆分名单 bug 致 4 失败样本各白跑 2 条 `view -s` 报错；更深层：同日断点续跑补回 HC 失败样本后 gvcf.list 样本集已变，但旧 cohort 链产物非空仍被幂等 SKIP——旧口径矩阵按旧列数裁决（列数守卫使每行原样保留）、补回样本 view -s 静默失败不进 adj_vcfs，交付残缺还报 success——"断点续跑即可恢复"的承诺在样本集变化场景失效，须守卫作废重算 |
+| DEC-35 | **按步骤类型分化并行 workers（v2.24.0）**：`plan` 新增 `workers_gatk`（Step3/4/5-每样本HC/6：GATK 单线程类，每路峰值 ≈1.3×gatk 堆、CPU 每路预算 max(2, hmm 档) 核）与 `workers_io`（Step0 md5/合并 + Step1 fastp/fastqc：每路 ~2G、≤ GATK 类）；比对类 `workers` 与 bwa/-K/-Y、sort、fastp/fastqc/mosdepth 线程、GATK/cohort -Xmx、幂等 SKIP、cgroup/WSL2 探测、快速失败、`--workers` 最高优先级（三类同步覆盖）全部维持不变；HC `--native-pair-hmm-threads` 由固定 min(4, T/2) 改为 min(期望档, ⌊可用核/workers_gatk⌋)——保证 workers_gatk×hmm ≤ 可用核防超订阅，50 核机期望档仍为 4（单样本 HC 耗时不变，批耗时按波数线性折算）；table()/run_summary/启动与完成通知同步展示三类推导 | 50 线程/305.7G 机 48 样本批次实测：GATK 单线程工具以比对类 4 路并行时整机 CPU ~10%、内存 ~40G/290G——比对类 workers 被每路 17G bwa 索引峰值钉死（4=290//20.5），而 GATK 阶段索引非工作集；全程 6h53m 中 Step3 16min/Step4 79min/Step5 206min/Step6 34min 全部受 workers=4 限制；分化后 50 核机 GATK 类 12 路（min(48//4, 290//10.4)）、IO 类 12 路，预计全程 ~3.5h（HC 206→69min、BQSR 79→26min） |
 
 ## 5. 统一口径与阈值总表（TH = config.py 镜像）<!-- HUMAN 可改值；MACHINE 同步 config 后过校验 -->
 
@@ -240,16 +246,28 @@ cohort 级与 MultiQC 串行。样本失败即隔离（记入 failed，退出后
 | Step 6 · 捕获/覆盖/口径 | 捕获效率 PCT_SELECTED <TH-14 / depth <TH-11 / 20X <TH-13 / Ti-Tv <TH-22 / call rate <TH-23 | P2 |
 | Step 6 · 深度离散 | 批次内 mean depth CV > TH-35（疑似混入异常样本） | P2 |
 
-### 5.3 资源规划推导（DEC-03）
+### 5.3 资源规划推导（DEC-03 + DEC-35 按步骤类型分化）
 
 - 探测：CPU = min(os.cpu_count, sched_getaffinity, cgroup cpu.max 配额)；内存 = min(MemAvailable, cgroup memory.max)。
 - 预留：2 核 + max(2G, 可用内存 5%)。
 - 每样本线程 T 分档：可用核 ≥64→24；32-63→12；16-31→8；<16→4。
-- workers = min(⌊可用核/T⌋, ⌊可用内存/单样本峰值⌋)；单样本峰值 = 17G 索引 + T×sort缓冲 + GATK + 1G 杂项。
+- **比对类 workers（Step2）** = min(⌊可用核/T⌋, ⌊可用内存/单样本峰值⌋)；
+  单样本峰值 = 17G 索引 + T×sort缓冲 + GATK + 1G 杂项（bwa 饱和设计，96% CPU）。
+- **GATK 类 workers_gatk（Step3/4/5-HC/6，DEC-35）** = min(⌊可用核/max(2, hmm 档)⌋,
+  ⌊可用内存/(1.3×gatk 堆)⌋)——GATK 单线程工具（MarkDuplicates/BQSR/HC/HsMetrics）
+  每路峰值 ≈1.3×gatk 堆（JVM 元空间/GC/IO），**不含 bwa 索引**（非该阶段工作集）；
+  CPU 每路预算 max(2, hmm 档) 核（hmm 线程 + JVM 余量）。
+- **IO 类 workers_io（Step0/1）** = min(⌊可用内存/2G⌋, workers_gatk)。
+- HC hmm 线程 = min(期望档 min(4, T/2), ⌊可用核/workers_gatk⌋)——保证
+  workers_gatk×hmm ≤ 可用核（防超订阅）；期望档与 T 挂钩，50 核机保持 hmm=4
+  （单样本 HC 耗时不随并行度变化，耗时可直接按波数折算）。
 - sort -m = 剩余预算×0.25，钳位 TH-27~28（整数+单位，如 `512M`）；GATK -Xmx 钳位 TH-29~30；cohort（串行）= 可用 60% 钳位 TH-31~32。
-- 快速失败：workers=1 时峰值仍 > 可用 → 启动即 SystemExit。
+- 快速失败：workers=1 时峰值仍 > 可用 → 启动即 SystemExit（比对类口径不变）。
 - 档位：`auto`=实测（超过 100 线程/900G 照常用）；`low`=16 线程/20G 强制规划；`high`=100 线程/900G。
-- 优先级：`--workers` > `--threads`/`--max-memory` > `--resource-profile` > 自动探测。
+- 优先级：`--workers`（三类同步覆盖）> `--threads`/`--max-memory` > `--resource-profile` > 自动探测。
+- 实测口径（50 线程/305.7G，48 样本批次）：改造前 GATK 类沿用比对类 4 路 →
+  Step3-6 整机 CPU ~10%；分化后比对 4×12 线程 / GATK 12 路×hmm4=48 核 / IO 12 路，
+  全程 6h53m → 约 3.5h（HC 206→~69min、BQSR 79→~26min 按波数线性折算）。
 
 ### 5.4 通知时机与模板
 
@@ -362,7 +380,7 @@ results/260422_20260914/                     Output/260422_20260914/
 | 文件 | 覆盖 |
 | --- | --- |
 | test_runner.py | tool 拼装/binds、cpath 映射、rt 绝对路径自包含解析、PATH 兜底、幂等 SKIP、dry-run 不执行、超时 kill、统计命令 timeout=600 传递 |
-| test_resource.py | sort -m 整数 MB、-Xmx 格式、low/high 档精确值、快速失败（mock 探测）、计划表、workers 覆盖 |
+| test_resource.py | sort -m 整数 MB、-Xmx 格式、low/high 档精确值、快速失败（mock 探测）、计划表、workers 覆盖、**步骤类型分化 workers（DEC-35：50 核机 GATK 类 12 路/IO 类 12 路锚、全档位 workers_gatk×hmm≤usable_cores 防超订阅不变式、low 7 路/high 24 路、--workers 三类同步+hmm 反推降档、table 三类推导行、to_dict 新键）** |
 | test_scanner.py | 三种布局、无效输入（R1R2 不匹配/0 字节）、布局互斥与同名冲突、md5（含外送平铺样本名推导）、合并（真实与 dry-run）、samples.tsv 列 |
 | test_dingtalk.py | 规范化纯函数（表格降级/换行/截断）；企业机器人链路（mock _request 不发网络）：groupMessages/send 请求结构、msgParam JSON 字符串、token 进程内缓存、未配置零网络+单次 WARN、文件后缀/20MB 校验、media/upload multipart+sampleFile、交付 zip 打包推送（≤20MB 单包）、**交付超限分卷（DEC-27：每卷独立合法 zip ≤ 上限/partNNofMM 命名/无丢失无重复/说明消息点名卷数与合并方法/单卷装不下的文件点名跳过/卷数超上限回落纯说明消息）** |
 | test_alerts.py | P0/P1/P2 三级判定全集（含 TH-33~36 新检查）、最差级别、里程碑模板 |
@@ -377,7 +395,7 @@ CI（.github/workflows/ci.yml）在 py3.10/3.12 矩阵执行。
 
 ### 9.2 迁移/重建验证顺序（DEC-12）
 
-1. `./run_tests.sh` 全绿（全部用例数见 §9.1 各文件，当前共 156）
+1. `./run_tests.sh` 全绿（全部用例数见 §9.1 各文件，当前共 163）
 2. `cp .env.example .env` 填 webhook → `python3 run_pipeline.py --notify-test`（连通性）
 3. `python3 run_pipeline.py --dry-run --batch <小批次>`（容器/参考文件/路径与资源计划）
 4. `python3 run_pipeline.py --resource-profile low --dry-run`（低配档口径）
@@ -385,7 +403,7 @@ CI（.github/workflows/ci.yml）在 py3.10/3.12 矩阵执行。
 
 ### 9.3 重建完成判据
 
-156 用例 + check_design 全绿；`--version` 输出与本文档 version 一致；dry-run 零落盘；
+163 用例 + check_design 全绿；`--version` 输出与本文档 version 一致；dry-run 零落盘；
 单批次实跑 success 且 Step 6 交付目录含 VCF+tbi+MultiQC，`md5sum -c` 全过。
 
 ## 10. 变更日志（CHANGELOG）<!-- 人机共写：每方改动各记一行 -->
@@ -448,6 +466,8 @@ CI（.github/workflows/ci.yml）在 py3.10/3.12 矩阵执行。
 | 2.23.0 | 2026-09-19 | 人 | 外部服务器实跑事故复盘指示：核查"4 样本 HC 被信号杀死 → 连锁 partial → 拦截交付推送"因果链；修复 nohup 后台运行被终端关闭杀死的问题；修正设计文档与测试用例等相关文件并推送 GitHub |
 | 2.23.0 | 2026-09-19 | 机 | 因果链核查属实（exit=129=128+SIGHUP、JVM 覆盖 nohup 继承忽略位、拆分 view -s exit=255、partial 拦截推送为 DEC-24 有意设计）；DEC-33：main() 启动 `signal(SIGHUP, SIG_IGN)` + GATK 10 类命令 `--java-options "-Xrs -Xmx…"` + fastqc 命令前缀 `_JAVA_OPTIONS=-Xrs`（启动器不收 --java-options）；DEC-34：Step5 每样本拆分名单 calling→hc_ok（修连锁报错）+ cohort 复跑守卫（现存关键 VCF header 样本清单≠本次 hc_ok → 作废 cohort/matrix/per_sample_vcf 重算，防补回样本被幂等 SKIP 静默丢失）；DESIGN §3.1/§4/§8/§9、README §1/§8、RUN_HISTORY RUN-48、tests README 同步；测试 148→156（SIGHUP 守卫/GATK -Xrs 防残留/HC 命令形态/fastqc 注入/拆分名单/cohort 守卫三态）；run_tests + check_design 全绿；RUN-48 |
 | 2.23.1 | 2026-09-19 | 机 | RUN-49 补漏（用户提交外部服务器手工恢复方案求分析触发）：cohort 复跑守卫增删 qc/bcftools_stats/cohort.*.stats 与 qc/multiqc/——run_stats 按产物非空幂等、run_multiqc 按报告存在幂等，v2.23.0 守卫只作废 cohort/matrix/per_sample_vcf，陈旧统计（Ti/Tv 等）与陈旧 MultiQC 报告仍会被 SKIP 沿用；multiqc_data/ 子目录整树删；测试锚扩展（stats/MultiQC/子目录纳入三态断言）；对方手工方案分析结论：删除集正确且完整（正是本补漏的依据），setsid 为旧版本下最彻底的 SIGHUP 规避；验证 156 tests + check_design 全绿；RUN-49 |
+| 2.24.0 | 2026-09-19 | 人 | 并行资源规划优化：48 样本批次全程 6h53m 压缩到 ≤4h，不改变任何分析结果与产物格式——按步骤类型分化 workers（比对类维持、GATK 单线程类放宽到 ~12 路、IO 类 8-12 路），HC hmm 线程随 workers_gatk 反推防超订阅；保持幂等/通知/--workers 优先级/探测/快速失败/cohort 串行不变 |
+| 2.24.0 | 2026-09-19 | 机 | DEC-35：resource.plan 增 workers_gatk（min(⌊核/max(2,hmm 档)⌋, ⌊内存/(1.3×gatk 堆)⌋)，常量 GATK_MEM_OVERHEAD=1.3/IO_WORKER_PEAK_GB=2.0）与 workers_io（min(⌊内存/2G⌋, workers_gatk)），hc_hmm_threads=min(期望档 min(4,T/2), ⌊核/workers_gatk⌋)（50 核机 4 不变）；run_pipeline Step0 md5/合并与 Step1 接 workers_io、Step3/4/5-HC/6 接 workers_gatk、Step2 比对类不动；table() 三类推导行 + 启动/完成通知措辞 + run_summary 新键；--workers 三类同步覆盖；测试 156→163（TestWorkerClasses：50 核机 12 路锚/全档位防超订阅不变式/low 7 路/high 24 路/覆盖三类同步+hmm 降档/表格行/to_dict 键）；DESIGN §3.1/§5.3/DEC-35、README §4/§5、tests README 同步；本机（16 核）基线与优化实跑 0_raw_data_test 三样本批，矩阵 md5 与 VCF body md5 逐字节一致（RUN-50） |
 
 ## 11. 证据索引 <!-- MACHINE -->
 
@@ -456,7 +476,7 @@ CI（.github/workflows/ci.yml）在 py3.10/3.12 矩阵执行。
 | 运行台账（每轮） | pipeline/design_doc/RUN_HISTORY.md |
 | 验收运行（0_raw_data_test） | results/260422_20260914/、results/260422_20260916/ 等（运行日志在各批次 logs/） |
 | 交付 | Output/<批次>_<日期>/ + INDEX.md（累积） |
-| 测试集与 CI | pipeline/tests/（156 用例）+ run_tests.sh + .github/workflows/ci.yml |
+| 测试集与 CI | pipeline/tests/（163 用例）+ run_tests.sh + .github/workflows/ci.yml |
 | 使用说明/与笔记差异 | pipeline/README.md |
 | 环境参数 | pipeline/.env（密钥，600）+ pipeline/.env.example（模板） |
 | 命令参考快照 | pipeline/design_doc/notes_code_reference.md |

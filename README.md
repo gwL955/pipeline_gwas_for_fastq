@@ -206,21 +206,37 @@ python3 archive_results.py --days 60   # 自定义保留天数；--results/--out
 探测：CPU = min(os.cpu_count, cgroup cpu.max 配额)（容器/cgroup 环境识别）；
 内存 = min(MemAvailable, cgroup 限额)。预留 2 核 + max(2G, 可用 5%)。
 
-推导：按可用核分档定每样本线程 T（≥64→24；32-63→12；16-31→8；<16→4），
-workers(核)=⌊可用核/T⌋；再按内存收紧 workers（单样本峰值 = bwa-mem2 索引
-17G(mmap 常驻) + T×sort缓冲 + GATK + 杂项 1G），取较小值；随后反推
-SORT_MEM（128M-2G 钳位）与 GATK_MEM（1g-8g 钳位）。串行 cohort 步骤取可用内存
-60%（-Xmx8g-32g 钳位）。**快速失败**：单样本峰值 > 可用内存（如 <20G 装不下人类
-bwa-mem2 索引）启动即报错退出，禁止跑到一半 OOM。计划透明：启动打印完整推导表、
-写入 run_summary.json、进入钉钉启动通知。
+推导：按可用核分档定每样本线程 T（≥64→24；32-63→12；16-31→8；<16→4）。
+**按步骤类型分化 workers（v2.24.0/DEC-35）**：
 
-| 档位 | workers | T | sort -m | GATK -Xmx | 说明 |
-| --- | --- | --- | --- | --- | --- |
-| auto（自动探测） | ⌊可用核/T⌋ | 24 | 2G | 8g | 探测推导 |
-| high（100 线程/900G） | 4 | 24 | 2G | 8g | 强制规划 |
-| low（16 线程/20G） | 1 | 4 | 128M | 1g | 强制规划；峰值 19.5G≤20G |
+- **比对类 `workers`（Step2 bwa）**：min(⌊可用核/T⌋, ⌊可用内存/单样本峰值⌋)，
+  单样本峰值 = bwa-mem2 索引 17G(mmap 常驻) + T×sort缓冲 + GATK + 杂项 1G
+  （bwa 饱和设计，实测 96% CPU）；
+- **GATK 类 `workers_gatk`（Step3 MarkDuplicates / Step4 BQSR / Step5 每样本
+  HaplotypeCaller / Step6 HsMetrics）**：min(⌊可用核/max(2, hmm 档)⌋,
+  ⌊可用内存/(1.3×GATK 堆)⌋)——这些工具单线程，每路峰值 ≈1.3×堆（JVM 开销）、
+  **不含 bwa 索引**（GATK 阶段索引非工作集），故可比比对类宽得多；
+- **IO 类 `workers_io`（Step0 md5/合并、Step1 fastp/fastqc）**：
+  min(⌊可用内存/2G⌋, workers_gatk)；
+- **HC `--native-pair-hmm-threads`** = min(期望档 min(4, T/2), ⌊可用核/workers_gatk⌋)
+  ——保证 workers_gatk×hmm ≤ 可用核（防超订阅），50 核机期望档仍为 4。
+
+随后反推 SORT_MEM（128M-2G 钳位）与 GATK_MEM（1g-8g 钳位）。串行 cohort 步骤取
+可用内存 60%（-Xmx8g-32g 钳位）。**快速失败**：单样本峰值 > 可用内存（如 <20G
+装不下人类 bwa-mem2 索引）启动即报错退出，禁止跑到一半 OOM。计划透明：启动打印
+完整推导表（含三类 workers）、写入 run_summary.json、进入钉钉启动通知。
+`--workers` 手工覆盖三类同步生效（hmm 随之反推）。
+
+| 档位 | 比对类 | GATK 类 | IO 类 | T | sort -m | GATK -Xmx | 说明 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| auto（50 线程/305.7G 实测） | 4 | 12（hmm4，12×4=48 核） | 12 | 12 | 994M | 8g | 探测推导 |
+| high（100 线程/900G） | 4 | 24（hmm4） | 24 | 24 | 2G | 8g | 强制规划 |
+| low（16 线程/20G） | 1 | 7（hmm2） | 7 | 4 | 128M | 1g | 强制规划；比对峰值 19.5G≤20G |
 
 auto 档超过 100 线程/900G 照常使用（不设人为上限），只扣系统预留。
+实测收益（50 线程/305.7G，48 样本批次）：改造前 GATK 单线程工具全部沿用比对类
+4 路，整机 CPU ~10%；分化后 HC 206→约 69min、BQSR 79→约 26min，全程
+6h53m → 约 3.5h，比对步骤与全部分析参数不变。
 
 **低配边界（要点）**：bwa-mem2 人类索引常驻 17G，mmap 之外运行时+缓存开销实测
 ≈2-4G；cgroup 硬上限场景实测下限约 24-26G，裸机 20G 属临界（依赖内核对 mmap

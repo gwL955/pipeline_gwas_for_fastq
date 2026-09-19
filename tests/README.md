@@ -1,6 +1,6 @@
 # pipeline 单元测试集（迁移/改动后的快速回归）
 
-**纯 Python 标准库，无容器、无网络、无真实数据，约 5 秒跑完 156 个用例。**
+**纯 Python 标准库，无容器、无网络、无真实数据，约 5 秒跑完 163 个用例。**
 每个用例对应本项目开发/运行中的真实踩坑或硬性口径，改动代码后先跑本测试再跑真实数据。
 
 ## 运行
@@ -15,7 +15,7 @@ cd pipeline
 | 文件 | 覆盖 | 对应踩坑/要求 |
 | --- | --- | --- |
 | `test_runner.py` | tool() 拼装、binds、cpath 路径映射、**rt 绝对路径解析与 PATH 兜底**、幂等 SKIP、dry-run 不执行、超时 kill、capture、**统计类命令 timeout=600 传递（RUN-31）** | binds 变量遮蔽曾致 tool() 崩溃；产物存在时不执行命令（`exit 7` 也返回 0）；无输出长命令超时曾不生效（本测试集修复）；PATH 受限环境启动曾致 `singularity: not found`（RUN-22，本测试集修复） |
-| `test_resource.py` | sort -m 格式、gatk/cohort -Xmx 格式、low/high 档精确值、快速失败、计划透明表 | `samtools sort -m 2.0G` 被解析为 2 字节——必须整数+单位（`128M`）；low 档必须 workers=1/T=4/128M/1g；内存装不下索引必须启动即 SystemExit |
+| `test_resource.py` | sort -m 格式、gatk/cohort -Xmx 格式、low/high 档精确值、快速失败、计划透明表、**步骤类型分化 workers（DEC-35：50 核机 GATK 类 12 路/IO 类 12 路锚、全档位 workers_gatk×hmm≤usable_cores 防超订阅不变式、--workers 三类同步覆盖 + hmm 反推降档、table 三类推导行、to_dict 新键）** | `samtools sort -m 2.0G` 被解析为 2 字节——必须整数+单位（`128M`）；low 档必须 workers=1/T=4/128M/1g；内存装不下索引必须启动即 SystemExit；GATK 单线程工具曾沿用比对类 workers（每路含 17G 索引峰值）→ 48 样本批次 Step3-6 整机 CPU ~10%、全程 6h53m（RUN-50：DEC-35 分化 GATK 类 12 路 × hmm4 = 48 核满载不超订、IO 类 12 路，比对类不动） |
 | `test_scanner.py` | Illumina 平铺/外送子目录/**外送平铺（RUN-36）三种布局**、S 号与 Lane、R1/R2 不匹配与 0 字节无效标记、**布局互斥锚（Illumina 命名不得误认外送平铺）**、**同名冲突先认者优先**、**md5 失败样本名推导覆盖外送平铺**、**Undetermined 剔除锚（RUN-45/DEC-31：不在 valid/invalid、进 ignored、二元组解包兼容、大小写不敏感）**、合并（真实与 dry-run）、samples.tsv 列 | dry-run 下合并曾被误判失败致批次失败；无效样本不得影响其余样本；外送交付平铺数据曾两种识别器都不认 → 整批"无有效样本"静默跳过（RUN-36 事故）；平铺文件 md5 失败样本名曾误取整个文件名致失败集与有效集无交集（RUN-33 病根）；Illumina 下机自带 Undetermined（BCLConvert 未匹配 index reads）曾被当样本分析、一路进联合分型/矩阵/Output 污染整批（RUN-45 事故，DEC-31 剔除） |
 | `test_dingtalk.py` | 表格降级/单换行→`\n\n`/超长截断/列表可渲染；**企业机器人链路（mock _request 零网络，RUN-39）**：groupMessages/send 请求结构与 msgParam JSON 字符串、token 进程内缓存、未配置零网络+单次 WARN、文件后缀/20MB 白名单、media/upload multipart→sampleFile、交付 zip 打包推送（≤20MB 单包）、**交付超限分卷（RUN-41/DEC-27：每卷独立合法 zip ≤上限、partNNofMM、无丢失无重复、说明消息点名卷数与合并方法、单卷装不下点名跳过、卷数超上限回落纯说明消息）** | 钉钉 markdown 官方子集**不含表格**、换行必须 `\n\n`（曾整条消息渲染成竖线串）；notify=on 曾零通知痕迹无法事后确认（RUN-29）；msgParam 传对象会被钉钉拒绝；测试曾因 mock token 缓存泄漏发出真实网络请求（RUN-39 修复：tearDown 强制清缓存）；文件白名单只认 zip 等五后缀——`.zip.001` 真分卷后缀上传必被拒，"分卷压缩发送"只能每卷独立 zip（RUN-41） |
 | `test_envfile.py` | .env 解析语法（注释/export/引号/行内注释/URL 含=?&）、三源优先级（环境变量>.env>默认）、webhook 默认空、**源码防回潮锚（不得出现 access_token=）**、未配置时 send/notify 降级不抛异常、**靶区 bed 改址锚（GWAS_TARGETS_BED 只指 bed 本体、派生文件随同目录、默认路径，RUN-38）** | 钉钉 webhook 曾硬编码在 config.py 默认值里（密钥随代码泄露，RUN-26 迁 pipeline/.env）；reload 类用例须在 finally 中恢复真实 config 防污染；靶区 bed 属私密文件不得入仓库（.gitignore 拦截），路径只经 .env 改 |
@@ -27,7 +27,7 @@ cd pipeline
 
 ## 新服务器迁移后的建议验证顺序
 
-1. `./run_tests.sh` —— 156 用例全绿（验证 Python 版本兼容与全部纯逻辑）
+1. `./run_tests.sh` —— 163 用例全绿（验证 Python 版本兼容与全部纯逻辑）
 2. `cp .env.example .env`（pipeline/ 下）并填入钉钉地址 → `python3 run_pipeline.py --notify-test` —— 钉钉连通性（webhook/关键词，需能出网）
 3. `python3 run_pipeline.py --dry-run --batch <小批次>` —— 容器/参考文件/路径可用性与资源计划推导
 4. `python3 run_pipeline.py --resource-profile low --dry-run` —— 低配档口径（workers=1、sort 128M、GATK 1g）

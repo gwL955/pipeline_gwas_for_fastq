@@ -258,7 +258,8 @@ class BatchCtx:
         # （v2.9.0 DEC-21，原为剔除该样本继续；anom 随启动通知可见）
         md5_failed = set()
         if not self.args.dry_run:
-            md5_failed, _ = scanner.verify_md5(self.batch_dir, self.log, workers=self.plan.workers)
+            md5_failed, _ = scanner.verify_md5(self.batch_dir, self.log,
+                                               workers=self.plan.workers_io)
             for sm in sorted(md5_failed & set(valid)):
                 self.log.error(f"md5 校验失败，样本 {sm} 输入数据损坏")
                 pre_anoms.append(("P0", f"{sm} md5 校验失败（输入数据损坏）"))
@@ -272,9 +273,9 @@ class BatchCtx:
                     f"{datetime.now().strftime('%m-%d %H:%M')}"
                     f"\n\n指标: 探测 {p.cpu_detected} 线程 / {p.mem_detected} GB｜"
                     f"profile {p.profile}（预留 {p.reserve_cores} 核 + {p.reserve_mem_gb} GB）"
-                    f"\n\n计划: workers {p.workers} × 每样本 {p.threads} 线程｜"
-                    f"sort -m {p.sort_mem}｜GATK -Xmx {p.gatk_mem}｜cohort {p.cohort_mem}"
-                    f"｜单样本峰值 {p.peak_per_sample_gb} GB")
+                    f"\n\n计划: 比对 {p.workers}×{p.threads} 线程｜GATK 类 {p.workers_gatk} 路"
+                    f"｜IO 类 {p.workers_io} 路｜sort -m {p.sort_mem}｜GATK -Xmx {p.gatk_mem}"
+                    f"｜cohort {p.cohort_mem}｜单样本峰值 {p.peak_per_sample_gb} GB")
             for lv, msg in pre_anoms:
                 body += f"\n\n异常: [{lv}] {msg}" + {"P0": " ← 阻断级（中断分析）", "P1": " ← 需确认"}.get(lv, " ← 提示")
             if not pre_anoms:
@@ -300,7 +301,7 @@ class BatchCtx:
 
         self.merged, merge_failed = scanner.merge_all(
             valid, os.path.join(self.work, "fastq_merged"), self.runner,
-            self.slog, self.plan.workers)
+            self.slog, self.plan.workers_io)   # IO 类（DEC-35）
         for sm, reason in merge_failed.items():
             invalid[sm] = reason
             valid.pop(sm, None)
@@ -367,7 +368,8 @@ class BatchCtx:
                 mfastqc.check_adapter_cleared(qr1, t1, slog)
             return sm, True, met
 
-        res = _parallel({sm: (lambda sm=sm: s1(sm)) for sm in self.merged}, self.plan.workers)
+        res = _parallel({sm: (lambda sm=sm: s1(sm)) for sm in self.merged},
+                        self.plan.workers_io)   # IO 类（DEC-35）
         for sm, r in res.items():
             if isinstance(r, tuple) and len(r) == 3:
                 _, ok, note = r
@@ -414,7 +416,7 @@ class BatchCtx:
     def step2_align(self):
         """Step 2：bwa-mem2 比对 + sort + flagstat/stats 质检。"""
         self._t0 = time.time()
-        self.log.step(f"Step 2: bwa-mem2 比对（{self.plan.workers} workers × {self.plan.threads} 线程，"
+        self.log.step(f"Step 2: bwa-mem2 比对（比对类 {self.plan.workers} workers × {self.plan.threads} 线程，"
                  f"sort -m {self.plan.sort_mem}）")
 
         def s2(sm):
@@ -503,7 +505,8 @@ class BatchCtx:
             return sm, True, met
 
         res = _parallel({sm: (lambda sm=sm: s3(sm)) for sm in self.merged
-                         if sm not in self.failed}, self.plan.workers)
+                         if sm not in self.failed},
+                        self.plan.workers_gatk)   # GATK 单线程类（DEC-35）
         for sm, r in res.items():
             if isinstance(r, tuple) and len(r) == 3:
                 _, ok, met = r
@@ -565,7 +568,8 @@ class BatchCtx:
             return sm, True, None
 
         res = _parallel({sm: (lambda sm=sm: s4(sm)) for sm in self.merged
-                         if sm not in self.failed}, self.plan.workers)
+                         if sm not in self.failed},
+                        self.plan.workers_gatk)   # GATK 单线程类（DEC-35）
         for sm, r in res.items():
             if isinstance(r, tuple) and len(r) == 3:
                 _, ok, note = r
@@ -628,7 +632,8 @@ class BatchCtx:
                 return sm, False
             return sm, True
 
-        res = _parallel({sm: (lambda sm=sm: s5(sm)) for sm in calling}, self.plan.workers)
+        res = _parallel({sm: (lambda sm=sm: s5(sm)) for sm in calling},
+                        self.plan.workers_gatk)   # GATK 单线程类（DEC-35）
         hc_ok = []
         for sm, r in res.items():
             if r == (sm, True):
@@ -829,7 +834,8 @@ class BatchCtx:
             return sm, True, (ms, hs)
 
         res = _parallel({sm: (lambda sm=sm: s6(sm)) for sm in self.merged
-                         if sm not in self.failed}, self.plan.workers)
+                         if sm not in self.failed},
+                        self.plan.workers_gatk)   # GATK 单线程类（DEC-35）
         for sm, r in res.items():
             if isinstance(r, tuple) and len(r) == 3:
                 _, ok, (ms, hs) = r
@@ -1263,7 +1269,7 @@ def _notify_result(batch, bdata, plan, log):
         f"\n\n样本: {len(bdata['samples']['valid'])} 有效｜"
         f"联合分型 {len(bdata['samples'].get('calling') or [])}"
         f"\n\n指标: 总耗时 {int(hh)}h{int(mm)}m{int(ss)}s｜"
-        f"workers {plan.workers}×{plan.threads}"
+        f"workers 比对 {plan.workers}×{plan.threads}/GATK {plan.workers_gatk}/IO {plan.workers_io}"
         f"\n\n质量: fastp 保留率 {_avg(m.get('fastp_retention'), excluded)}%｜"
         f"mapped {_avg(m.get('mapped_pct'), excluded)}%｜dup {_avg(m.get('dup_pct'), excluded)}%｜"
         f"20X {_avg(m.get('pct_20x'), excluded)}%"
