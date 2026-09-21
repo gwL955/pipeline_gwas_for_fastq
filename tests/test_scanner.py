@@ -143,9 +143,10 @@ class TestMd5(unittest.TestCase):
                 def error(self, *a): pass
                 def result(self, *a): pass
                 def warn(self, *a): pass
-            failed, n = scanner.verify_md5(td, _L(), workers=2)
+            failed, n, state = scanner.verify_md5(td, _L(), workers=2)
             self.assertEqual(n, 2)
             self.assertIn("SM1", failed)      # 坏的那条 → 样本列入失败集
+            self.assertEqual(state, "FAIL")   # 三态（DEC-36）
 
     def test_verify_md5_flat_outsourced_sample_name(self):
         """★ md5 失败样本名推导覆盖外送平铺（RUN-36）：平铺文件样本名=去 _R# 尾——
@@ -163,10 +164,78 @@ class TestMd5(unittest.TestCase):
                 def error(self, *a): pass
                 def result(self, *a): pass
                 def warn(self, *a): pass
-            failed, n = scanner.verify_md5(td, _L(), workers=2)
+            failed, n, state = scanner.verify_md5(td, _L(), workers=2)
             self.assertEqual(n, 2)
             self.assertIn("SM1", failed)
             self.assertNotIn("SM1_R1.fastq.gz", failed)         # 不得是整个文件名
+            self.assertEqual(state, "FAIL")
+
+
+class TestMd5Manifest(unittest.TestCase):
+    """★ md5 清单识别与三态（DEC-36）：md5 开头/txt 结尾（不区分大小写）/
+    <TH-37 500KB；无清单 → SKIPPED（跳过校验不报错）；有清单失败 → FAIL（调用方 P0 阻断）"""
+
+    class _Rec:
+        def __init__(self):
+            self.lines = []
+
+        def __getattr__(self, lv):
+            def w(*a):
+                self.lines.append((lv, a[0] if a else ""))
+            return w
+
+    def test_manifest_pattern_and_size_cap(self):
+        """识别口径：大小写/变体名可认；名字不符或 ≥500KB 不认（防大文本文件误认）"""
+        import hashlib
+        with tempfile.TemporaryDirectory() as td:
+            _touch(os.path.join(td, "SM1_R1.fastq.gz"), b"aaaa")
+            good = hashlib.md5(b"aaaa").hexdigest()
+            open(os.path.join(td, "MD5清单.TXT"), "w", encoding="utf-8").write(
+                f"{good}  SM1_R1.fastq.gz\n")            # 大写+中文+大写扩展名
+            open(os.path.join(td, "checksum.txt"), "w").write("x")   # 非 md5 开头
+            open(os.path.join(td, "md5.csv"), "w").write("x")        # 非 txt 结尾
+            with open(os.path.join(td, "md5big.txt"), "wb") as f:
+                f.write(b"x" * (500 * 1024))              # 恰 500KB → 不认（须小于）
+            path, cands = scanner.find_md5_manifest(td)
+            self.assertEqual(cands, ["MD5清单.TXT"])
+            failed, n, state = scanner.verify_md5(td, self._Rec(), workers=2)
+            self.assertEqual((failed, n, state), (set(), 1, "OK"))
+            open(os.path.join(td, "md5ok.txt"), "w").write(
+                f"{good}  SM1_R1.fastq.gz\n")             # 第二个小清单 → 多候选入列
+            path2, cands2 = scanner.find_md5_manifest(td)
+            self.assertEqual(cands2, ["MD5清单.TXT", "md5ok.txt"])
+
+    def test_three_states_skipped_ok_fail(self):
+        """三态：无清单 SKIPPED / 清单全对 OK / 清单有错 FAIL（样本入失败集）"""
+        import hashlib
+        with tempfile.TemporaryDirectory() as td:
+            failed, n, state = scanner.verify_md5(td, self._Rec(), workers=2)
+            self.assertEqual((failed, n, state), (set(), 0, "SKIPPED"))
+            _touch(os.path.join(td, "SM1_R1.fastq.gz"), b"aaaa")
+            _touch(os.path.join(td, "SM1_R2.fastq.gz"), b"bbbb")
+            g1, g2 = (hashlib.md5(x).hexdigest() for x in (b"aaaa", b"bbbb"))
+            open(os.path.join(td, "md5_sum.txt"), "w", encoding="utf-8").write(
+                f"{g1}  SM1_R1.fastq.gz\n{g2}  SM1_R2.fastq.gz\n")
+            failed, n, state = scanner.verify_md5(td, self._Rec(), workers=2)
+            self.assertEqual((failed, state), (set(), "OK"))
+            open(os.path.join(td, "md5_sum.txt"), "w", encoding="utf-8").write(
+                f"{g1}  SM1_R1.fastq.gz\n{'0' * 32}  SM1_R2.fastq.gz\n")
+            failed, n, state = scanner.verify_md5(td, self._Rec(), workers=2)
+            self.assertEqual(state, "FAIL")
+            self.assertIn("SM1", failed)
+
+    def test_multiple_candidates_first_sorted_with_warn(self):
+        """多清单候选：字典序取首个，WARN 点名忽略其余（防静默挑单）"""
+        with tempfile.TemporaryDirectory() as td:
+            open(os.path.join(td, "md5b.txt"), "w").write("")
+            open(os.path.join(td, "md5a.txt"), "w").write("")
+            path, cands = scanner.find_md5_manifest(td)
+            self.assertEqual(os.path.basename(path), "md5a.txt")
+            self.assertEqual(cands, ["md5a.txt", "md5b.txt"])
+            log = self._Rec()
+            scanner.verify_md5(td, log, workers=1)     # 空清单 0 条，仍应 WARN 多候选
+            self.assertTrue(any("md5a.txt" in m and "md5b.txt" in m
+                                for lv, m in log.lines if lv == "warn"))
 
 
 class TestMerge(unittest.TestCase):

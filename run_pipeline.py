@@ -254,12 +254,13 @@ class BatchCtx:
         for lv, msg in pre_anoms:
             (self.log.error if lv == "P0" else self.log.warn)(f"[开跑前-{lv}] {msg}")
 
-        # md5 完整性校验：失败=输入数据损坏，属"严重影响分析"——P0 整批阻断
-        # （v2.9.0 DEC-21，原为剔除该样本继续；anom 随启动通知可见）
-        md5_failed = set()
+        # md5 完整性校验：有清单且失败=输入数据损坏，属"严重影响分析"——P0 整批
+        # 阻断（v2.9.0 DEC-21，原为剔除该样本继续；anom 随启动通知可见）；
+        # 清单识别与三态（OK/FAIL/SKIPPED 无清单跳过）见 DEC-36
+        md5_failed, md5_state = set(), "SKIPPED"
         if not self.args.dry_run:
-            md5_failed, _ = scanner.verify_md5(self.batch_dir, self.log,
-                                               workers=self.plan.workers_io)
+            md5_failed, _, md5_state = scanner.verify_md5(self.batch_dir, self.log,
+                                                          workers=self.plan.workers_io)
             for sm in sorted(md5_failed & set(valid)):
                 self.log.error(f"md5 校验失败，样本 {sm} 输入数据损坏")
                 pre_anoms.append(("P0", f"{sm} md5 校验失败（输入数据损坏）"))
@@ -315,11 +316,12 @@ class BatchCtx:
         self.log.result(f"Step 0 完成: {len(self.merged)} 样本合并就绪，samples.tsv 已生成")
         lanes_merged = sum(len(si.r1) for sm, si in valid.items() if sm in self.merged)
         self.step_time("step0")
+        md5_txt = (f"FAIL {len(md5_failed)}" if md5_state == "FAIL"
+                   else {"OK": "OK", "SKIPPED": "SKIPPED（无清单）"}[md5_state])
         _step_notify(self.notify_on, self.batch, 0, "清点与Lane合并", self.log,
                      total_steps=self.args.step,
                      samples=f"{len(self.merged)}/{n_initial} 成功 | Lane 合并 {lanes_merged}/{lanes_expected}",
-                     metrics=f"输入 {_fmt_gb(input_bytes)} | md5 "
-                             f"{'FAIL ' + str(len(md5_failed)) if md5_failed else 'OK'}"
+                     metrics=f"输入 {_fmt_gb(input_bytes)} | md5 {md5_txt}"
                              f" | 无效样本 {len(invalid)}",
                      anomalies=[("P1", f"{sm} {rs}（样本终止，其余照常）")
                                 for sm, rs in merge_failed.items()],
@@ -328,7 +330,6 @@ class BatchCtx:
                      log_hint=f"tail -f {self.work}/logs/sample_<样本>.self.log")
 
         self.excluded = {s.strip() for s in (self.args.exclude_samples or "").split(",") if s.strip()}
-
 
     # ── step1_qc_trim ──
     def step1_qc_trim(self):

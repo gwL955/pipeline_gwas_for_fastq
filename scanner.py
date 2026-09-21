@@ -9,6 +9,7 @@ import hashlib
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+import config
 from runner import nonempty
 
 ILLUMINA_RE = re.compile(
@@ -162,7 +163,7 @@ def scan_batch(batch_dir):
     return ScanResult(valid, invalid, ignored)
 
 
-# ── md5 校验（并行；失败样本终止分析并进入通知） ────────────────────────
+# ── md5 校验（并行；有清单且失败 → 调用方 P0 中断；无清单跳过，DEC-36）─────
 _md5_lock = threading.Lock()
 
 
@@ -174,11 +175,39 @@ def _md5_one(path):
     return h.hexdigest()
 
 
+def find_md5_manifest(batch_dir):
+    """定位批次 md5 清单（DEC-36）：文件名 md5 开头、txt 结尾（均不区分大小写）、
+    体积 < config.MD5_MANIFEST_MAX_BYTES（TH-37=500KB，防同名大文本数据文件误认）。
+    多候选取字典序首个（其余由调用方 WARN 点名忽略）。→ (清单路径|None, 候选名列表)"""
+    try:
+        names = sorted(os.listdir(batch_dir))
+    except OSError:
+        return None, []
+    cands = []
+    for n in names:
+        p = os.path.join(batch_dir, n)
+        low = n.lower()
+        if not (low.startswith("md5") and low.endswith("txt") and os.path.isfile(p)):
+            continue
+        try:
+            if os.path.getsize(p) >= config.MD5_MANIFEST_MAX_BYTES:
+                continue
+        except OSError:
+            continue
+        cands.append(n)
+    return (os.path.join(batch_dir, cands[0]) if cands else None), cands
+
+
 def verify_md5(batch_dir, logger, workers=4):
-    """批次内存在 md5sum.txt 时校验（并行）。返回 (失败样本集, 校验文件数)"""
-    md5_file = os.path.join(batch_dir, "md5sum.txt")
-    if not os.path.isfile(md5_file):
-        return set(), 0
+    """定位 md5 清单（DEC-36：md5*开头/txt 结尾/<TH-37）并校验（并行）。
+    返回 (失败样本集, 校验文件数, 状态)：状态 = OK / FAIL / SKIPPED——
+    无清单 → SKIPPED 跳过校验（不视为错误）；有清单且失败 → FAIL（调用方 P0 阻断）"""
+    md5_file, cands = find_md5_manifest(batch_dir)
+    if not md5_file:
+        logger.info("无 md5 清单（识别口径：md5 开头/txt 结尾/<500KB），跳过校验")
+        return set(), 0, "SKIPPED"
+    if len(cands) > 1:
+        logger.warn(f"多个 md5 清单候选，取 {cands[0]}（忽略: {', '.join(cands[1:])}）")
     entries = []
     with open(md5_file, encoding="utf-8") as f:
         for line in f:
@@ -186,7 +215,7 @@ def verify_md5(batch_dir, logger, workers=4):
             if len(parts) == 2:
                 entries.append((parts[0], os.path.normpath(
                     os.path.join(batch_dir, parts[1].strip().lstrip("*")))))
-    logger.info(f"md5sum.txt 存在，校验 {len(entries)} 个文件（{workers} 并行）")
+    logger.info(f"{os.path.basename(md5_file)} 存在，校验 {len(entries)} 个文件（{workers} 并行）")
     failed_samples, n_ok, n_bad = set(), 0, 0
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futs = {pool.submit(_md5_one, p): (md5, p) for md5, p in entries}
@@ -213,8 +242,9 @@ def verify_md5(batch_dir, logger, workers=4):
                     else:
                         failed_samples.add(os.path.basename(os.path.dirname(p)))
                     logger.error(f"md5 校验失败: {p} 期望 {md5} 实际 {actual} ({e_})")
-    logger.result(f"md5 校验完成: OK={n_ok} FAIL={n_bad}")
-    return failed_samples, len(entries)
+    state = "FAIL" if failed_samples else "OK"
+    logger.result(f"md5 校验完成[{state}]: OK={n_ok} FAIL={n_bad}")
+    return failed_samples, len(entries), state
 
 
 # ── Lane 合并 + samples.tsv ─────────────────────────────────────────────
