@@ -77,6 +77,8 @@
 
 | RUN-56 | 09-21 1x:xx | 用户指示：Step 3 钉钉通知加入批内变异 CV 指标，告警（P1）阈值 20% | ✅ | DEC-40/TH-38：config.DUP_CV_P1=0.2（比率口径同 DEPTH_CV_P2，check_design 镜像集登记）；alerts 新增 cv_of（总体方差口径，排除对照，<2/无值 None）与 check_dup_cv（>TH-38 → P1，消息点名 CV 值/阈值/重复率极值区间——疑似批次异质〔文库质量/上样量差异〕，比 Step6 深度 CV〔TH-35 P2〕早三步）；step3 里程碑 metrics 行增「批内变异 CV x.x%（阈值 20%）」（n/a 兜底）、anomalies 接入；DESIGN §3.1/§5.2/TH-38、双 README §6.3 表、tests README 同步。测试 173→175（TestDupCvP1：阈值命中/极值区间/均匀不报/单样本不判/对照排除/cv_of 比率与 None 口径） | alerts.py、run_pipeline.py、config.py、check_design.py；design_doc/DESIGN.md DEC-40/TH-38/CHANGELOG 2.30.0；tests/test_alerts.py |
 
+| RUN-57 | 09-21 1x:xx | 用户指示：step3 增加重复率的分位数、min\max\SD，ELS 最小值增加显示其 Z 值 SD | ✅ | DEC-41：①alerts.dup_stats_summary——"min-max x-x%｜SD x%｜P25/P50/P75 x/x/x%"（statistics.quantiles inclusive 线性插值；SD 总体口径与 CV 一致；排除对照；<2 样本 None→n/a），step3 metrics 行插入（均值行与批内 CV 行之间）；②els_summary 最低样本附（Z=±x.x）=(min-均值)/SD（SD=0 全等批无法定标不附；单值无离散不附），既有 均值/方差/最低 断言全兼容。测试 175→178（TestElsMinZscore：{100,200}→Z=-1.0 精确/三样本 -1.0/全等不附/单值不附；TestDupStatsSummary：字段与 inclusive 分位精确值/对照排除/<2 None） | alerts.py、run_pipeline.py；design_doc/DESIGN.md DEC-41/CHANGELOG 2.31.0；tests/test_alerts.py |
+
 ## 三、指标速查（最终有效轮：RUN-08/15 数据）<!-- MACHINE -->
 
 | 批次 | 样本 | fastp保留率 | mapped | dup | 20X | raw SNP/INDEL | PASS SNP/INDEL | Ti/Tv |

@@ -1,6 +1,6 @@
 # pipeline 单元测试集（迁移/改动后的快速回归）
 
-**纯 Python 标准库，无容器、无网络、无真实数据，约 5 秒跑完 175 个用例。**
+**纯 Python 标准库，无容器、无网络、无真实数据，约 5 秒跑完 178 个用例。**
 每个用例对应本项目开发/运行中的真实踩坑或硬性口径，改动代码后先跑本测试再跑真实数据。
 
 ## 运行
@@ -19,7 +19,7 @@ cd pipeline
 | `test_scanner.py` | Illumina 平铺/外送子目录/**外送平铺（RUN-36）三种布局**、S 号与 Lane、R1/R2 不匹配与 0 字节无效标记、**布局互斥锚（Illumina 命名不得误认外送平铺）**、**同名冲突先认者优先**、**md5 失败样本名推导覆盖外送平铺**、**md5 清单识别与三态锚（RUN-51/DEC-36：md5*开头/txt 结尾/<TH-37 500KB、大小写不敏感、恰 500KB 不认、多候选字典序首个+WARN；三态 OK/FAIL/SKIPPED 无清单跳过）**、**fq.gz 双扩展名三布局+混批 Lane 锚 / unmatched 点名（排除 md5 清单）锚（RUN-52/DEC-37）**、**Undetermined 剔除锚（RUN-45/DEC-31：不在 valid/invalid、进 ignored、二元组解包兼容、大小写不敏感）**、合并（真实与 dry-run）、samples.tsv 列 | dry-run 下合并曾被误判失败致批次失败；无效样本不得影响其余样本；外送交付平铺数据曾两种识别器都不认 → 整批"无有效样本"静默跳过（RUN-36 事故）；平铺文件 md5 失败样本名曾误取整个文件名致失败集与有效集无交集（RUN-33 病根）；清单曾限死 md5sum.txt——厂商变体名（MD5.txt/MD5清单.TXT 等）漏检即静默跳过、且无清单时通知恒显"md5 OK"有误导（RUN-51 放宽识别口径+三态播报）；Illumina 下机自带 Undetermined（BCLConvert 未匹配 index reads）曾被当样本分析、一路进联合分型/矩阵/Output 污染整批（RUN-45 事故，DEC-31 剔除） |
 | `test_dingtalk.py` | 表格降级/单换行→`\n\n`/超长截断/列表可渲染；**企业机器人链路（mock _request 零网络，RUN-39）**：groupMessages/send 请求结构与 msgParam JSON 字符串、token 进程内缓存、未配置零网络+单次 WARN、文件后缀/20MB 白名单、media/upload multipart→sampleFile、交付 zip 打包推送（≤20MB 单包）、**交付超限分卷（RUN-41/DEC-27：每卷独立合法 zip ≤上限、partNNofMM、无丢失无重复、说明消息点名卷数与合并方法、单卷装不下点名跳过、卷数超上限回落纯说明消息）** | 钉钉 markdown 官方子集**不含表格**、换行必须 `\n\n`（曾整条消息渲染成竖线串）；notify=on 曾零通知痕迹无法事后确认（RUN-29）；msgParam 传对象会被钉钉拒绝；测试曾因 mock token 缓存泄漏发出真实网络请求（RUN-39 修复：tearDown 强制清缓存）；文件白名单只认 zip 等五后缀——`.zip.001` 真分卷后缀上传必被拒，"分卷压缩发送"只能每卷独立 zip（RUN-41） |
 | `test_envfile.py` | .env 解析语法（注释/export/引号/行内注释/URL 含=?&）、三源优先级（环境变量>.env>默认）、webhook 默认空、**源码防回潮锚（不得出现 access_token=）**、未配置时 send/notify 降级不抛异常、**靶区 bed 改址锚（GWAS_TARGETS_BED 只指 bed 本体、派生文件随同目录、默认路径，RUN-38）** | 钉钉 webhook 曾硬编码在 config.py 默认值里（密钥随代码泄露，RUN-26 迁 pipeline/.env）；reload 类用例须在 finally 中恢复真实 config 防污染；靶区 bed 属私密文件不得入仓库（.gitignore 拦截），路径只经 .env 改 |
-| `test_alerts.py` | **P0/P1/P2 三级判定**（v2.9.0 DEC-21：质量阈值全量 P2、NTC 污染 P1、mapped<90 P1 报错不中断）、最差级别、里程碑模板字段（**含"（共 X 步）"标题锚——X=--step，Step 0 预备步不计入全流程共 6 步、--step 0 不追加后缀、不传兼容锚，RUN-46/DEC-32 + RUN-47**）、产物摘要、**对照样本豁免锚（RUN-45/DEC-31：reads 低对照降级 OK 提示行含实际数值、多对照逐个点名、fastp/depth_cv 跳过、默认参数旧行为不变）**、**提示带 90 阈值锚（93% 不再进带、85% 仍在带）**、**ELS 播报锚（RUN-46/DEC-32：排除对照后均值/总体方差/最低值+样本，NTC 不再占据最低；\_\_avg 均值排除对照）** | 分级体系：P0=阻断中断 / P1=严重不中断 / P2=质量提示；NTC 污染曾为 P0（RUN-33 降级锚）；RUN-34 新增 reads 不足/NTC reads 占比/深度 CV/recal 观测数检查；**Step3 批内重复率 CV>P1 20% 锚（TH-38/DEC-40：极值区间点名/均匀不报/单样本不判/对照排除/cv_of 展示口径）**；NTC reads 32 曾被"上样不足"P1 误报、提示带曾把全批 49 样本点名一遍（RUN-45：对照豁免 + TH-02 95→90）；Step3"ELS 最小"曾被 NTC 的极小 ELS 占据（reads 近 0）被误读为文库复杂度不足、Step2/3/6 与完成通知的均值行同样含 NTC 失真（RUN-46：els_summary 三元组 + 指标播报豁免） |
+| `test_alerts.py` | **P0/P1/P2 三级判定**（v2.9.0 DEC-21：质量阈值全量 P2、NTC 污染 P1、mapped<90 P1 报错不中断）、最差级别、里程碑模板字段（**含"（共 X 步）"标题锚——X=--step，Step 0 预备步不计入全流程共 6 步、--step 0 不追加后缀、不传兼容锚，RUN-46/DEC-32 + RUN-47**）、产物摘要、**对照样本豁免锚（RUN-45/DEC-31：reads 低对照降级 OK 提示行含实际数值、多对照逐个点名、fastp/depth_cv 跳过、默认参数旧行为不变）**、**提示带 90 阈值锚（93% 不再进带、85% 仍在带）**、**ELS 播报锚（RUN-46/DEC-32：排除对照后均值/总体方差/最低值+样本，NTC 不再占据最低；\_\_avg 均值排除对照）** | 分级体系：P0=阻断中断 / P1=严重不中断 / P2=质量提示；NTC 污染曾为 P0（RUN-33 降级锚）；RUN-34 新增 reads 不足/NTC reads 占比/深度 CV/recal 观测数检查；**Step3 批内重复率 CV>P1 20% 锚（TH-38/DEC-40：极值区间点名/均匀不报/单样本不判/对照排除/cv_of 展示口径）**、**重复率分布锚（DEC-41：min-max/SD/P25-P50-P75 inclusive 分位/对照排除）与 ELS 最低 Z 值锚（-1.0 精确/SD=0 不附）**；NTC reads 32 曾被"上样不足"P1 误报、提示带曾把全批 49 样本点名一遍（RUN-45：对照豁免 + TH-02 95→90）；Step3"ELS 最小"曾被 NTC 的极小 ELS 占据（reads 近 0）被误读为文库复杂度不足、Step2/3/6 与完成通知的均值行同样含 NTC 失真（RUN-46：els_summary 三元组 + 指标播报豁免） |
 | `test_parsers.py` | fastqc zip（小写状态）、fastp json、markdup/hsmetrics 按表头名、flagstat、samtools stats、bcftools stats、norm 统计、mosdepth summary | fastqc 状态是小写 pass/fail（曾按大写比较误报）；bcftools stats SN 行带文件 ID 列；norm 统计行是 7 字段动态表头；mosdepth 是 6 列且靶区深度取 `total_region` 行；flagstat `in total` 行无百分比（本测试集修复的潜伏 bug）；recal 观测数按 RecalTable1 表头名取列只加 M 行（RUN-34） |
 | `test_variant_post.py` | 矩阵 `./.` 裁决（DP≥20/cells_total）、rebuild 只换 GT、GT 列显式映射、**norm_split 产物检查口径（norm 不查 .tbi）** | **GT 列序互换**曾致两样本基因型对调；矩阵列序必须按 calling 顺序显式映射；norm 命令 outputs 曾混入 .tbi（由后续 index 命令生成），首跑必误报"产物缺失"（RUN-29 修复） |
 | `test_archive.py` | 归档脚本：超期目录筛选（`<名>_<YYYYMMDD>` 后缀日期/边界>30 天/非法日期跳过）、**7z 命令口径锚（-t7z -mx=9 -mfb=192 -ms=on -md=256m -snl -mmt -sdel）**、幂等跳过（同名 .7z 存在）、失败保留源、真实 7z 往返（skipUnless 本机有 7z，CI 无 7z 自动跳过） | -sdel 语义由 7z 保证（成功才删源）；压缩参数为用户指定口径，改动须经用户确认 |
@@ -27,7 +27,7 @@ cd pipeline
 
 ## 新服务器迁移后的建议验证顺序
 
-1. `./run_tests.sh` —— 175 用例全绿（验证 Python 版本兼容与全部纯逻辑）
+1. `./run_tests.sh` —— 178 用例全绿（验证 Python 版本兼容与全部纯逻辑）
 2. `cp .env.example .env`（pipeline/ 下）并填入钉钉地址 → `python3 run_pipeline.py --notify-test` —— 钉钉连通性（webhook/关键词，需能出网）
 3. `python3 run_pipeline.py --dry-run --batch <小批次>` —— 容器/参考文件/路径可用性与资源计划推导
 4. `python3 run_pipeline.py --resource-profile low --dry-run` —— 低配档口径（workers=1、sort 128M、GATK 1g）

@@ -571,10 +571,13 @@ class BatchCtx:
         els_str = alerts.els_summary(self.metrics.get("els"), excluded=self.excluded)
         dup_cv = alerts.cv_of(self.metrics.get("dup_pct"), excluded=self.excluded)
         dup_cv_str = f"{dup_cv * 100:.1f}%" if dup_cv is not None else "n/a"
+        dup_stats = alerts.dup_stats_summary(self.metrics.get("dup_pct"),
+                                             excluded=self.excluded)
         _step_notify(self.notify_on, self.batch, 3, "去重", self.log,
                      total_steps=self.args.step,
                      samples=f"{len(self.merged) - len(self.failed)}/{len(self.merged)} 成功",
                      metrics=f"重复率 {_avg(self.metrics.get('dup_pct'), self.excluded)}% | "
+                             f"{dup_stats if dup_stats else '分布 n/a（样本 <2）'} | "
                              f"批内变异 CV {dup_cv_str}（阈值 {config.DUP_CV_P1 * 100:.0f}%） | "
                              f"ELS {els_str if els_str else 'n/a'}",
                      anomalies=_step_anoms(self, "step3")

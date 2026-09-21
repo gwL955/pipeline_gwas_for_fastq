@@ -159,6 +159,41 @@ class TestNewChecks(unittest.TestCase):
         self.assertEqual(alerts.check_recal_low({"B": 45782114.0}), [])
 
 
+class TestElsMinZscore(unittest.TestCase):
+    """★ ELS 最低值 Z 值锚（DEC-41/RUN-57）：最低样本附（Z=±x.x）=偏离均值的
+    SD 倍数——直观判断该样本 ELS 是否离群；SD=0（无法定标）不附 Z"""
+
+    def test_els_min_zscore(self):
+        s = alerts.els_summary({"A": 100, "B": 200})
+        self.assertIn("（Z=-1.0）", s)                 # (100-150)/50 = -1
+        s3 = alerts.els_summary({"TG017": 8305698, "TG018": 9100000, "TG019": 8500000})
+        self.assertIn("Z=-1.0", s3)                    # TG017 ≈ -0.97 → -1.0
+        self.assertNotIn("Z=", alerts.els_summary({"A": 5, "B": 5}))   # 全等：SD=0 不定标
+        self.assertNotIn("Z=", alerts.els_summary({"A": 42}))          # 单值无离散
+
+
+class TestDupStatsSummary(unittest.TestCase):
+    """★ Step3 重复率分布播报锚（DEC-41/RUN-57）：min-max/SD/P25-P50-P75 分位
+    （statistics.quantiles 线性插值 inclusive 口径）——与批内 CV 共同刻画形态"""
+
+    def test_dup_stats_fields(self):
+        s = alerts.dup_stats_summary({"A": 5.0, "B": 7.5})
+        self.assertIn("min-max 5.0-7.5%", s)
+        self.assertIn("SD 1.2%", s)                    # 总体口径 sd=1.25
+        self.assertIn("P25/P50/P75 5.6/6.2/6.9%", s)   # inclusive 分位
+        s5 = alerts.dup_stats_summary({"A": 5.0, "B": 6.0, "C": 7.0, "D": 8.0})
+        self.assertIn("min-max 5.0-8.0%", s5)
+        self.assertIn("P25/P50/P75 5.8/6.5/7.2%", s5)
+
+    def test_dup_stats_scope(self):
+        s = alerts.dup_stats_summary({"A": 5.0, "B": 6.0, "NTC": 90.0},
+                                     excluded={"NTC"})
+        self.assertNotIn("90", s)                      # 对照不参与
+        self.assertIn("min-max 5.0-6.0%", s)
+        self.assertIsNone(alerts.dup_stats_summary({"A": 5.0}))   # <2 样本
+        self.assertIsNone(alerts.dup_stats_summary(None))
+
+
 class TestDupCvP1(unittest.TestCase):
     """★ Step3 批内变异 CV（DEC-40/RUN-56）：批内重复率 CV >TH-38（20%）→ P1——
     重复率是建库/上样的指纹，批内离散比 Step6 深度 CV 早三步暴露批次异质"""

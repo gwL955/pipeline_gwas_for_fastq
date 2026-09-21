@@ -40,6 +40,7 @@ OK 提示行播报）。
 
 import glob
 import os
+import statistics
 from datetime import datetime
 
 import config
@@ -66,10 +67,12 @@ def _avg(d):
 
 
 def els_summary(els, excluded=()):
-    """ELS 播报串（v2.22.0/DEC-32）："均值 … · 方差 … · 最低 <样本> …"
-    （科学计数法）——排除对照样本：NTC reads 近 0，其 ELS 无统计意义且必然
-    占据最低值（误读为文库复杂度不足）。方差取总体方差（除以 n，与
-    check_depth_cv 同口径）；无有效数值返回 None"""
+    """ELS 播报串（v2.22.0/DEC-32；最低值带 Z 值 v2.31.0/DEC-41）：
+    "均值 … · 方差 … · 最低 <样本> …（Z=±x.x）"（科学计数法；Z=最低值偏离
+    均值的 SD 倍数，直观判断该样本是否离群）——排除对照样本：NTC reads 近 0，
+    其 ELS 无统计意义且必然占据最低值（误读为文库复杂度不足）。方差取总体
+    方差（除以 n，与 check_depth_cv 同口径）；无有效数值/SD=0（无法定标）时
+    不附 Z；无有效数值返回 None"""
     vals = [(sm, v) for sm, v in (els or {}).items()
             if isinstance(v, (int, float)) and sm not in excluded]
     if not vals:
@@ -77,7 +80,26 @@ def els_summary(els, excluded=()):
     mean = sum(v for _, v in vals) / len(vals)
     var = sum((v - mean) ** 2 for _, v in vals) / len(vals)
     lo_sm, lo_v = min(vals, key=lambda x: x[1])
-    return f"均值 {mean:.2e} · 方差 {var:.2e} · 最低 {lo_sm} {lo_v:.2e}"
+    z_txt = ""
+    sd = var ** 0.5
+    if sd > 0:
+        z_txt = f"（Z={(lo_v - mean) / sd:+.1f}）"
+    return f"均值 {mean:.2e} · 方差 {var:.2e} · 最低 {lo_sm} {lo_v:.2e}{z_txt}"
+
+
+def dup_stats_summary(dup_pct, excluded=()):
+    """Step3 重复率分布播报（DEC-41）："min-max …%｜SD …%｜P25/P50/P75 …"——
+    与批内变异 CV 共同刻画批次重复率形态（分位=statistics.quantiles 线性插值
+    inclusive 口径）；对照排除；有效样本 <2 返回 None（调用方显示 n/a）"""
+    vals = sorted(v for sm, v in (dup_pct or {}).items()
+                  if isinstance(v, (int, float)) and sm not in excluded)
+    if len(vals) < 2:
+        return None
+    mean = sum(vals) / len(vals)
+    sd = (sum((v - mean) ** 2 for v in vals) / len(vals)) ** 0.5
+    q1, q2, q3 = statistics.quantiles(vals, n=4, method="inclusive")
+    return (f"min-max {vals[0]:.1f}-{vals[-1]:.1f}%｜SD {sd:.1f}%｜"
+            f"P25/P50/P75 {q1:.1f}/{q2:.1f}/{q3:.1f}%")
 
 
 def _violating(d, threshold, below=True):

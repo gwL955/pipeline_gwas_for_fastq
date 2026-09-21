@@ -3,7 +3,7 @@
 ```yaml
 # ---- design-meta（机器可解析锚点，勿手改格式；版本规则见 §0）----
 doc: GWAS-pipeline-design
-version: 2.30.0
+version: 2.31.0
 updated: 2026-09-19
 owner_human: gewenlong
 owner_machine: ZCode(GLM)
@@ -177,6 +177,7 @@ Step 6 的矩阵裁决/每样本重建与 MultiQC 串行。HC `--native-pair-hmm
 | DEC-38 | **启动通知先于 md5 发出（v2.27.0）**：step0_scan 内通知顺序重排——开跑前检查（磁盘/依赖/批次名/样本名，毫秒级）→ **启动通知** → md5 校验（GB 级哈希可达数分钟）→ P0 判定；md5 异常不再进启动通知 pre_anoms（结果由 Step0 里程碑三态 OK/FAIL/SKIPPED（DEC-36）与 P0 失败通知（DEC-21 路径不变）兜底），启动播报不再被 md5 耗时阻塞 | 用户要求第一条信息必须是批次启动信息、应在程序开始 md5 之前发出（RUN-53）；md5 曾位于启动通知之前，大输入批次启动消息迟到数分钟 |
 | DEC-39 | **对照排除改 token 级匹配（v2.29.0）**：`--exclude-samples`（默认 NTC）命中口径从整串相等放宽为**整串相等或 [_\-.] 分隔 token 相等（均不区分大小写）**；`self.excluded` 存命中的样本名（原为排除项字面），全部消费者（calling 名单/指标豁免/HsMetrics 对照口径/TH-21·34 污染监控的 NTC 识别）随之生效；命中样本逐个 INFO 播报，未命中项 INFO 说明（无对照批次不刷屏）；部分子串不误中（MNTCX 不中 NTC） | 外部服务器实跑：外送平铺对照名带长前缀（如 `..._ZM20260918D_NTC_combined`），整串比对 `"NTC"` 漏排——排除集为空 → NTC 进联合分型、污染监控同时失效（RUN-55） |
 | DEC-40 | **Step3 通知加入批内变异 CV（v2.30.0）**：去重里程碑 metrics 行增「批内变异 CV x.x%（阈值 20%）」（alerts.cv_of，总体方差口径同 TH-35 深度 CV，排除对照、样本 <2 显 n/a 不判）；超 TH-38（DUP_CV_P1=0.2，P1 级）→ 异常行点名极值区间——重复率是建库/上样环节的指纹，批内离散比 Step6 深度 CV（TH-35 P2）早三步暴露批次异质 | 用户要求（RUN-56）：Step3 钉钉通知加入批内变异 CV 指标，P1 阈值 20% |
+| DEC-41 | **Step3 统计播报扩容（v2.31.0）**：①重复率分布——新增 `dup_stats_summary`："min-max x-x%｜SD x%｜P25/P50/P75 x/x/x%"（分位=statistics.quantiles 线性插值 inclusive 口径；总体方差 SD 与 CV 同口径；排除对照；<2 样本 n/a），与均值行、批内 CV（TH-38）共同刻画批次重复率形态；②ELS 最低值附 **Z 值**（`（Z=±x.x）`=偏离均值的 SD 倍数，直观判断该样本文库复杂度是否离群；SD=0 无法定标不附） | 用户要求（RUN-57）：重复率加分位数/min/max/SD，ELS 最小值显示 Z 值 SD |
 
 ## 5. 统一口径与阈值总表（TH = config.py 镜像）<!-- HUMAN 可改值；MACHINE 同步 config 后过校验 -->
 
@@ -404,7 +405,7 @@ CI（.github/workflows/ci.yml）在 py3.10/3.12 矩阵执行。
 
 ### 9.2 迁移/重建验证顺序（DEC-12）
 
-1. `./run_tests.sh` 全绿（全部用例数见 §9.1 各文件，当前共 175）
+1. `./run_tests.sh` 全绿（全部用例数见 §9.1 各文件，当前共 178）
 2. `cp .env.example .env` 填 webhook → `python3 run_pipeline.py --notify-test`（连通性）
 3. `python3 run_pipeline.py --dry-run --batch <小批次>`（容器/参考文件/路径与资源计划）
 4. `python3 run_pipeline.py --resource-profile low --dry-run`（低配档口径）
@@ -412,7 +413,7 @@ CI（.github/workflows/ci.yml）在 py3.10/3.12 矩阵执行。
 
 ### 9.3 重建完成判据
 
-175 用例 + check_design 全绿；`--version` 输出与本文档 version 一致；dry-run 零落盘；
+178 用例 + check_design 全绿；`--version` 输出与本文档 version 一致；dry-run 零落盘；
 单批次实跑 success 且 Step 6 交付目录含 VCF+tbi+MultiQC，`md5sum -c` 全过。
 
 ## 10. 变更日志（CHANGELOG）<!-- 人机共写：每方改动各记一行 -->
@@ -489,6 +490,8 @@ CI（.github/workflows/ci.yml）在 py3.10/3.12 矩阵执行。
 | 2.29.0 | 2026-09-21 | 机 | DEC-39：新 _match_excluded（整串或 [_\-.] token，不区分大小写）；self.excluded 改存命中样本名（消费者集合语义不变全线生效）；命中/未命中 INFO 播报；CLI help 更新；测试 171→173（token 单元锚：长前缀/大小写/部分子串不误中 + 长前缀 NTC E2E 锚：dry-run HC 命令不含对照名且播报命中行）；RUN-55 |
 | 2.30.0 | 2026-09-21 | 人 | Step 3 钉钉通知加入批内变异 CV 指标，告警（P1）阈值 20% |
 | 2.30.0 | 2026-09-21 | 机 | DEC-40/TH-38：config.DUP_CV_P1=0.2（镜像集登记）+ alerts.cv_of/check_dup_cv（总体方差口径、排除对照、<2 不判）；step3 通知 metrics 增「批内变异 CV x.x%（阈值 20%）」、anomalies 接 check_dup_cv（点名极值区间）；测试 173→175；RUN-56 |
+| 2.31.0 | 2026-09-21 | 人 | Step3 通知扩容：重复率加分位数、min/max/SD；ELS 最小值显示 Z 值（SD 单位） |
+| 2.31.0 | 2026-09-21 | 机 | DEC-41：alerts.dup_stats_summary（min-max/SD/P25-P50-P75，inclusive 分位）接入 step3 metrics 行；els_summary 最低值附（Z=±x.x）（SD=0 不附）；测试 175→178（Z 值口径锚：-1.0 精确值/全等不附/单值不附 + 分布字段锚：inclusive 分位/对照排除/<2 None）；RUN-57 |
 
 ## 11. 证据索引 <!-- MACHINE -->
 
@@ -497,7 +500,7 @@ CI（.github/workflows/ci.yml）在 py3.10/3.12 矩阵执行。
 | 运行台账（每轮） | pipeline/design_doc/RUN_HISTORY.md |
 | 验收运行（0_raw_data_test） | results/260422_20260914/、results/260422_20260916/ 等（运行日志在各批次 logs/） |
 | 交付 | Output/<批次>_<日期>/ + INDEX.md（累积） |
-| 测试集与 CI | pipeline/tests/（175 用例）+ run_tests.sh + .github/workflows/ci.yml |
+| 测试集与 CI | pipeline/tests/（178 用例）+ run_tests.sh + .github/workflows/ci.yml |
 | 使用说明/与笔记差异 | pipeline/README.md |
 | 环境参数 | pipeline/.env（密钥，600）+ pipeline/.env.example（模板） |
 | 命令参考快照 | pipeline/design_doc/notes_code_reference.md |
