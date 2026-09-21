@@ -238,6 +238,49 @@ class TestMd5Manifest(unittest.TestCase):
                                 for lv, m in log.lines if lv == "warn"))
 
 
+class TestFqGzExtension(unittest.TestCase):
+    """★ .fq.gz 扩展名识别（DEC-37/RUN-52）：三种布局均须认 fastq|fq 双写法——
+    曾只认 .fastq.gz，.fq.gz 整批被静默忽略 → "无有效样本"跳过且原因不可见"""
+
+    def test_fq_gz_all_three_layouts(self):
+        # 布局 1：Illumina 平铺（含 .fq.gz 与 .fastq.gz 混批多 Lane）
+        with tempfile.TemporaryDirectory() as td:
+            _touch(os.path.join(td, "SM1_S1_L001_R1_001.fq.gz"), b"a")
+            _touch(os.path.join(td, "SM1_S1_L001_R2_001.fq.gz"), b"b")
+            _touch(os.path.join(td, "SM1_S1_L002_R1_001.fastq.gz"), b"c")
+            _touch(os.path.join(td, "SM1_S1_L002_R2_001.fastq.gz"), b"d")
+            valid, invalid = scanner.scan_batch(td)
+            self.assertEqual(list(valid), ["SM1"])
+            self.assertEqual(valid["SM1"].layout, "illumina")
+            self.assertEqual(len(valid["SM1"].r1), 2)      # 双扩展名 Lane 均认领
+        # 布局 2：外送子目录
+        with tempfile.TemporaryDirectory() as td:
+            _touch(os.path.join(td, "SM2", "SM2_R1.fq.gz"), b"a")
+            _touch(os.path.join(td, "SM2", "SM2_R2.fq.gz"), b"b")
+            valid, invalid = scanner.scan_batch(td)
+            self.assertEqual(list(valid), ["SM2"])
+            self.assertEqual(valid["SM2"].layout, "outsourced")
+        # 布局 3：外送平铺
+        with tempfile.TemporaryDirectory() as td:
+            _touch(os.path.join(td, "SM3_R1.fq.gz"), b"a")
+            _touch(os.path.join(td, "SM3_R2.fq.gz"), b"b")
+            valid, invalid = scanner.scan_batch(td)
+            self.assertEqual(list(valid), ["SM3"])
+            self.assertEqual(valid["SM3"].layout, "outsourced_flat")
+
+    def test_scan_batch_unmatched_reported(self):
+        """★ 未识别文件进 .unmatched（DEC-37）：md5 清单等预期非样本文件除外——
+        跳过路径点名可见，杜绝"识别失败但无原因可查"（RUN-52 病根）"""
+        with tempfile.TemporaryDirectory() as td:
+            _touch(os.path.join(td, "SM1_R1.fqq.gz"), b"a")   # 扩展名不认
+            _touch(os.path.join(td, "SM1_R2.fqq.gz"), b"b")
+            open(os.path.join(td, "md5sum.txt"), "w").write("")   # 预期非样本
+            valid, invalid = scanner.scan_batch(td)
+            self.assertEqual(valid, {})
+            scan = scanner.scan_batch(td)
+            self.assertEqual(scan.unmatched, ["SM1_R1.fqq.gz", "SM1_R2.fqq.gz"])
+
+
 class TestMerge(unittest.TestCase):
 
     def test_merge_all_real(self):

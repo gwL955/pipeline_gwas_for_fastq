@@ -201,13 +201,24 @@ class BatchCtx:
                     del valid[sm]
         self.bdata["samples"]["valid"] = sorted(valid)
         self.bdata["samples"]["invalid"] = invalid
+        self.bdata["samples"]["unmatched"] = list(scan.unmatched)   # DEC-37 追溯
+        if scan.unmatched:
+            self.log.info(f"未识别为样本的文件 {len(scan.unmatched)} 个"
+                          f"（不构成样本，忽略；扩展名应为 .fastq.gz/.fq.gz，DEC-37）")
         if not valid:
+            um = scan.unmatched
+            um_note = ""
+            if um:
+                shown = "、".join(um[:5]) + (f" 等 {len(um)} 个" if len(um) > 5 else "")
+                um_note = (f"\n\n- **未识别文件（不构成样本，扩展名应为"
+                           f" .fastq.gz/.fq.gz）**：{shown}")
+                self.log.warn(f"未识别文件 {len(um)} 个: {shown}")
             self.log.warn(f"批次 {self.batch} 无任何有效样本，跳过该批次（退出码仍为 0）")
             if self.notify_on:
                 reasons = "".join(f"\n\n- **{k}**：{v}" for k, v in invalid.items())
                 dingtalk.notify(f"批次 {self.batch} 跳过",
                                 f"#### 批次 {self.batch} 跳过（无有效样本）"
-                                f"\n\n> 无效样本清单如下，退出码保持 0{reasons}",
+                                f"\n\n> 无效样本清单如下，退出码保持 0{reasons}{um_note}",
                                 logger=self.log)
             self.step_time("step0")
             return self.bdata

@@ -98,7 +98,7 @@ python3 run_pipeline.py --notify-test    # 验证钉钉链路（markdown + 文�
   （独立扫描/QC/比对/去重/BQSR/批次内联合分型/过滤，结果隔离在
   `results/<批次>_<执行日期>/`，严禁跨批次合并样本或 gVCF）。三种布局自动识别：
   1. Illumina 平铺多 Lane：`260422/NA12878_S46_L001_R1_001.fastq.gz`
-     （样本名 = 去掉 `_S\d+_L\d+_R[12]_001.fastq.gz` 的前缀）
+     （样本名 = 去掉 `_S\d+_L\d+_R[12]_001.fastq.gz` 的前缀；扩展名 `.fastq.gz`/`.fq.gz` 均认，DEC-37）
   2. 外送子目录：`20260720/<样本名>/<样本名>_R1.fastq.gz`（样本名 = 子目录名）
   3. 外送平铺（v2.12.0/RUN-36）：`260917/<样本名>_R1.fastq.gz` 直接放批次目录
      （样本名 = 去掉 `_R[12].fastq.gz` 的前缀）

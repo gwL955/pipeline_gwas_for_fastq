@@ -67,6 +67,8 @@
 
 | RUN-51 | 09-21 1x:xx | 用户指示：Step0 md5 识别放宽——清单=md5 开头/txt 结尾/<500KB；无清单跳过校验；通知三态 OK/FAIL/SKIPPED（无清单）；有清单校验失败维持 P0 中断 | ✅ | DEC-36：scanner 新增 find_md5_manifest（大小写不敏感；TH-37=MD5_MANIFEST_MAX_BYTES 512000B 体积上限防大文本误认；多候选字典序首个+WARN 点名忽略其余），verify_md5 返回值 2 元→3 元（失败样本集/校验文件数/状态），无清单分支 INFO"跳过校验"；run_pipeline step0 接线三态、里程碑通知 md5 字段三态播报（此前无清单也恒显 OK，有误导）；P0 路径不变（md5_failed 非空→p0_reasons→raise）。测试 163→166（识别口径：大小写/中文/大写扩展名/非 txt/恰 500KB 不认/多候选入列；三态：SKIPPED/OK/FAIL；多候选 WARN 锚；旧 2 处 verify_md5 解包同步）+check_design（TH×33）全绿 | scanner.py、run_pipeline.py、config.py；design_doc/DESIGN.md DEC-36/TH-37/CHANGELOG 2.25.0；tests/test_scanner.py |
 
+| RUN-52 | 09-21 1x:xx | 用户报：输入文件扩展名 .fq.gz 时识别失败，且终端静默失败 → 复现确认：三个识别正则只认 .fastq.gz，.fq.gz 文件不构成样本、不进 invalid（扫描器静默忽略），整批走"无有效样本"跳过路径——退出码 0 + nohup 控制台止于日志路径行（RUN-37 设计）+ 跳过通知 invalid 清单为空，三重叠加形同静默失败。用户指示：修正识别 + 不再静默 | ✅ | DEC-37：①ILLUMINA_RE/OUTSOURCED_RE/FLAT_OUTSOURCED_RE 统一 `\.(?:fastq|fq)\.gz`（互斥性不受影响——结尾判据同步双认）；②scan_batch 增 .unmatched 未识别文件清单（平铺未被 Illumina/外送平铺认领 + 子目录内未被外送式认领；md5 清单按 DEC-36 口径排除），ScanResult 四参（二元组解包兼容保持）；③run_pipeline：有效批次存在未识别文件时 INFO 计数，跳过路径 WARN + 钉钉通知点名未识别文件（≤5 示例）与正确扩展名指引，run_summary 增 samples.unmatched 追溯。测试 166→169（fq.gz 三布局+混批双扩展名 Lane 锚 / unmatched 排除 md5 清单锚 / E2E 跳出不静默锚：退出码 0 但 stdout 点名 SM1_R1.fqq.gz 与 fastq.gz/.fq.gz 指引）；run_pipeline step0_scan/DESIGN/双 README/tests README 同步 | scanner.py、run_pipeline.py；design_doc/DESIGN.md DEC-37/CHANGELOG 2.26.0；tests/test_scanner.py、test_misc.py |
+
 ## 三、指标速查（最终有效轮：RUN-08/15 数据）<!-- MACHINE -->
 
 | 批次 | 样本 | fastp保留率 | mapped | dup | 20X | raw SNP/INDEL | PASS SNP/INDEL | Ti/Tv |

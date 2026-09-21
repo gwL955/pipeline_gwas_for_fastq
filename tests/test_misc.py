@@ -671,6 +671,32 @@ class TestBatchExceptionPath(unittest.TestCase):
             self.assertIn("批次 测试批次 失败", combined)   # except 分支完整走完
             self.assertNotIn("UnboundLocalError", combined)   # 修复锚：不再二次崩
 
+    def test_unrecognized_extension_skip_is_loud(self):
+        """★ 跳出不静默锚（RUN-52/DEC-37）：全部输入文件未被任何布局识别（如
+        .fqq.gz 这类扩展名）→ 批次跳过（退出码 0 属设计行为），但日志/通知必须
+        点名未识别文件与正确扩展名——曾未匹配文件不进 invalid、跳过原因不可见，
+        nohup 下终端形同静默失败"""
+        import subprocess
+        with tempfile.TemporaryDirectory() as td:
+            bdir = os.path.join(td, "in", "260921")
+            os.makedirs(bdir)
+            for r in ("R1", "R2"):
+                with open(os.path.join(bdir, f"SM1_{r}.fqq.gz"), "wb") as f:
+                    f.write(b"@x\nACGT\n+\nIIII\n")
+            env = {**os.environ, **_dep_env(td),
+                   "GWAS_RESULTS": os.path.join(td, "results")}
+            r = subprocess.run(
+                [sys.executable,
+                 os.path.join(os.path.dirname(os.path.dirname(
+                     os.path.abspath(__file__))), "run_pipeline.py"),
+                 "--dry-run", "--resource-profile", "low", "--notify", "off",
+                 "--input", os.path.join(td, "in")],
+                env=env, capture_output=True, text=True, timeout=90)
+            self.assertEqual(r.returncode, 0, r.stdout[-500:])   # 跳过≠失败
+            self.assertIn("无任何有效样本", r.stdout)
+            self.assertIn("SM1_R1.fqq.gz", r.stdout)     # 点名未识别文件
+            self.assertIn("fastq.gz/.fq.gz", r.stdout)   # 指引正确扩展名
+
 
 class TestSighupHardening(unittest.TestCase):
     """★ SIGHUP 防护锚（DEC-33/RUN-48）：nohup 只让 Python 忽略 SIGHUP，

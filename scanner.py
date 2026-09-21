@@ -13,10 +13,10 @@ import config
 from runner import nonempty
 
 ILLUMINA_RE = re.compile(
-    r"^(?P<sample>.+)_S(?P<snum>\d+)_L(?P<lane>\d{3})_R(?P<read>[12])_001\.fastq\.gz$")
-OUTSOURCED_RE = re.compile(r"_R(?P<read>[12])\.fastq\.gz$")
-# 外送平铺整名锚定；与 ILLUMINA_RE 互斥（结尾 _R#.fastq.gz 与 _001.fastq.gz 不可能兼得）
-FLAT_OUTSOURCED_RE = re.compile(r"^(?P<sample>.+)_R(?P<read>[12])\.fastq\.gz$")
+    r"^(?P<sample>.+)_S(?P<snum>\d+)_L(?P<lane>\d{3})_R(?P<read>[12])_001\.(?:fastq|fq)\.gz$")
+OUTSOURCED_RE = re.compile(r"_R(?P<read>[12])\.(?:fastq|fq)\.gz$")
+# 外送平铺整名锚定；与 ILLUMINA_RE 互斥（结尾 _R#.(fastq|fq).gz 与 _001.(fastq|fq).gz 不可能兼得）
+FLAT_OUTSOURCED_RE = re.compile(r"^(?P<sample>.+)_R(?P<read>[12])\.(?:fastq|fq)\.gz$")
 
 # 布局中文名（冲突提示/samples.tsv note 列共用）
 LAYOUT_LABELS = {"illumina": "平铺", "outsourced": "外送",
@@ -72,7 +72,7 @@ def scan_illumina_flat(flat, subdirs):
 
 
 def scan_outsourced_subdir(flat, subdirs):
-    """布局 2：外送子目录 <样本名>/<样本名>_R1.fastq.gz（样本名=子目录名）"""
+    """布局 2：外送子目录 <样本名>/<样本名>_R1.f(ast)q.gz（样本名=子目录名，DEC-37 双扩展名）"""
     samples = {}
     for dp in subdirs:
         r1s, r2s = [], []
@@ -89,7 +89,7 @@ def scan_outsourced_subdir(flat, subdirs):
 
 
 def scan_outsourced_flat(flat, subdirs):
-    """布局 3：外送平铺 <样本名>_R1.fastq.gz（文件直接放批次目录）"""
+    """布局 3：外送平铺 <样本名>_R1.f(ast)q.gz（文件直接放批次目录，DEC-37 双扩展名）"""
     samples = {}
     for fp in flat:
         m = FLAT_OUTSOURCED_RE.match(os.path.basename(fp))
@@ -105,23 +105,27 @@ LAYOUT_SCANNERS = (scan_illumina_flat, scan_outsourced_subdir, scan_outsourced_f
 
 
 class ScanResult(tuple):
-    """(valid, invalid) 二元组 + 附带 ignored 清单（DEC-31）。
+    """(valid, invalid) 二元组 + 附带 ignored/unmatched 清单（DEC-31/37）。
     既有 `valid, invalid = scan_batch(...)` 解包不受影响；ignored 经
-    `.ignored` 属性访问（Undetermined 等非样本条目，不算 invalid、不告警）。"""
+    `.ignored` 属性访问（Undetermined 等非样本条目，不算 invalid、不告警）；
+    unmatched 为未被任何布局识别的文件名（md5 清单除外）——批次被跳过时
+    点名可见，杜绝"识别失败但无原因可查"（RUN-52）。"""
 
-    def __new__(cls, valid, invalid, ignored):
+    def __new__(cls, valid, invalid, ignored, unmatched=()):
         self = super().__new__(cls, (valid, invalid))
         self.ignored = ignored
+        self.unmatched = list(unmatched)
         return self
 
 
 def scan_batch(batch_dir):
     """扫描批次目录 → (有效样本 dict, 无效样本 dict{sm: reason})，
     附 `.ignored` 名单（DEC-31：IGNORED_SAMPLES 命中的非样本条目，如 Illumina
-    下机自带的 Undetermined——剔除后不进分析，独立清单供 run_summary 追溯）。
-    布局按 LAYOUT_SCANNERS 依序识别：先认者优先，同一样本名被后到的
-    布局再认出 → 后者记冲突无效；不匹配任何布局的文件不构成样本（忽略）。
-    输入校验：R1/R2 文件数不一致、单端、0 字节 → 标记无效并跳过。"""
+    下机自带的 Undetermined——剔除后不进分析，独立清单供 run_summary 追溯）与
+    `.unmatched` 未识别文件名（DEC-37）。布局按 LAYOUT_SCANNERS 依序识别：
+    先认者优先，同一样本名被后到的布局再认出 → 后者记冲突无效；不匹配任何
+    布局的文件不构成样本（进 unmatched 供跳过路径点名）。输入校验：R1/R2
+    文件数不一致、单端、0 字节 → 标记无效并跳过。"""
     samples, invalid = {}, {}
     flat, subdirs = [], []
     for name in sorted(os.listdir(batch_dir)):
@@ -130,6 +134,22 @@ def scan_batch(batch_dir):
             flat.append(p)
         elif os.path.isdir(p):
             subdirs.append(p)
+
+    # 未识别文件（DEC-37）：平铺未被 Illumina/外送平铺式认领 + 子目录内未被
+    # 外送式认领；md5 清单（DEC-36 口径）属预期非样本文件，排除不报
+    _, md5_names = find_md5_manifest(batch_dir)
+    md5_names = set(md5_names)
+    unmatched = [os.path.basename(fp) for fp in flat
+                 if os.path.basename(fp) not in md5_names
+                 and not (ILLUMINA_RE.match(os.path.basename(fp))
+                          or FLAT_OUTSOURCED_RE.match(os.path.basename(fp)))]
+    for dp in subdirs:
+        try:
+            names = sorted(os.listdir(dp))
+        except OSError:
+            continue
+        unmatched += [f"{os.path.basename(dp)}/{n}" for n in names
+                      if n not in md5_names and not OUTSOURCED_RE.search(n)]
 
     for scan in LAYOUT_SCANNERS:
         for sm, si in scan(flat, subdirs).items():
@@ -160,7 +180,7 @@ def scan_batch(batch_dir):
             invalid[sm] = si.invalid_reason
 
     valid = {sm: si for sm, si in samples.items() if si.valid}
-    return ScanResult(valid, invalid, ignored)
+    return ScanResult(valid, invalid, ignored, unmatched)
 
 
 # ── md5 校验（并行；有清单且失败 → 调用方 P0 中断；无清单跳过，DEC-36）─────
