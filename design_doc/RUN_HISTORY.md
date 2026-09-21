@@ -73,6 +73,8 @@
 
 | RUN-54 | 09-21 1x:xx | 用户指示：启动信息输入大小统计口径改二进制（1024） | ✅ | _fmt_gb→_fmt_gib：÷1024³ 并以 GiB（IEC）标注，调用点三处同步（日志"有效样本…输入体量"/启动通知"输入 X"/Step0 里程碑"输入 X | md5 三态"）；曾十进制 1e9+GB 后缀，与 ls -lh/du 等工具的二进制口径不一致（同一批数据两处读数差 ~7%）；磁盘统计（free_gb/1e9，DISK_*_GB 阈值）为独立口径未动。测试 170→171（TestInputSizeFormatting：1GiB/3.50GiB/小值进位/不得残留 GB 后缀） | run_pipeline.py；tests/test_misc.py |
 
+| RUN-55 | 09-21 1x:xx | 外部服务器运行报 NTC 识别问题：排除机制为精确名匹配，本批对照是长前缀名（202609182149_AE01-231101003_4P260813139US293229A2_B_ZM20260918D_NTC_combined，外送平铺布局样本名=文件名去 _R[12].fq.gz 尾），run_pipeline 用 --exclude-samples(默认 "NTC") 整串比对 → excluded={"NTC"} 与样本集交集为空 | ✅ | DEC-39：新 _match_excluded——整串相等或 [_\-.] 分隔 token 相等（均不区分大小写），部分子串不误中（MNTCX 不中 NTC）；self.excluded 由"排除项字面"改存【命中的样本名】——全部消费者（step5 calling 名单/_avg 指标豁免/check_ntc TH-21·check_ntc_reads TH-34 污染监控/qc_hsmetrics control 口径）集合语义不变、直接生效（此前排除落空时污染监控同步失效）；命中样本逐个 INFO、未命中项 INFO 说明（无对照批次不刷屏）；CLI help/双 README/DESIGN CLI 表同步。测试 171→173（token 单元锚 + 长前缀 NTC dry-run E2E 锚：对照名不进任何 HaplotypeCaller 命令、播报"对照样本（排除出联合分型）"命中行） | run_pipeline.py；design_doc/DESIGN.md DEC-39/CHANGELOG 2.29.0；tests/test_misc.py |
+
 ## 三、指标速查（最终有效轮：RUN-08/15 数据）<!-- MACHINE -->
 
 | 批次 | 样本 | fastp保留率 | mapped | dup | 20X | raw SNP/INDEL | PASS SNP/INDEL | Ti/Tv |

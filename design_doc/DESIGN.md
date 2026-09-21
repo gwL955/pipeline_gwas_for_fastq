@@ -3,7 +3,7 @@
 ```yaml
 # ---- design-meta（机器可解析锚点，勿手改格式；版本规则见 §0）----
 doc: GWAS-pipeline-design
-version: 2.28.0
+version: 2.29.0
 updated: 2026-09-19
 owner_human: gewenlong
 owner_machine: ZCode(GLM)
@@ -175,6 +175,7 @@ Step 6 的矩阵裁决/每样本重建与 MultiQC 串行。HC `--native-pair-hmm
 | DEC-36 | **md5 清单识别放宽 + 校验三态（v2.25.0）**：清单不再限死 `md5sum.txt`——识别口径=文件名 md5 开头、txt 结尾（均不区分大小写，覆盖 MD5.txt/MD5清单.TXT 等厂商变体）、体积 <TH-37（500KB，防同名大文本数据文件误认），多候选取字典序首个（WARN 点名忽略其余）；校验三态 OK / FAIL / SKIPPED——无清单跳过校验（此前通知恒显"md5 OK"，未校验也报 OK 有误导），有清单且失败维持 P0 整批中断（DEC-21）；Step0 里程碑通知 md5 字段按三态播报 | 厂商交付清单命名不一（md5.txt/MD5清单.txt 等），旧口径漏检即静默跳过且通知误报 OK；用户指定识别口径与三态语义（RUN-51） |
 | DEC-37 | **输入扩展名双认 + 未识别文件点名（v2.26.0）**：三个布局识别正则（ILLUMINA_RE/OUTSOURCED_RE/FLAT_OUTSOURCED_RE）统一改为 `\.(?:fastq|fq)\.gz`——曾只认 .fastq.gz，.fq.gz 整批被静默忽略 → 批次"无有效样本"跳过且 invalid 为空、原因不可见（nohup 下终端形同静默失败）；scan_batch 新增 `.unmatched` 未识别文件清单（平铺未被 Illumina/外送平铺式认领 + 子目录内未被外送式认领；md5 清单 DEC-36 口径排除），写入 run_summary samples.unmatched；批次跳过路径日志 WARN + 钉钉通知点名未识别文件（≤5 个示例）与正确扩展名；有效批次存在未识别文件时 INFO 计数 | 用户实跑报 .fq.gz 识别失败且终端静默（RUN-52）；RUN-36 同类病根的通用化收口 |
 | DEC-38 | **启动通知先于 md5 发出（v2.27.0）**：step0_scan 内通知顺序重排——开跑前检查（磁盘/依赖/批次名/样本名，毫秒级）→ **启动通知** → md5 校验（GB 级哈希可达数分钟）→ P0 判定；md5 异常不再进启动通知 pre_anoms（结果由 Step0 里程碑三态 OK/FAIL/SKIPPED（DEC-36）与 P0 失败通知（DEC-21 路径不变）兜底），启动播报不再被 md5 耗时阻塞 | 用户要求第一条信息必须是批次启动信息、应在程序开始 md5 之前发出（RUN-53）；md5 曾位于启动通知之前，大输入批次启动消息迟到数分钟 |
+| DEC-39 | **对照排除改 token 级匹配（v2.29.0）**：`--exclude-samples`（默认 NTC）命中口径从整串相等放宽为**整串相等或 [_\-.] 分隔 token 相等（均不区分大小写）**；`self.excluded` 存命中的样本名（原为排除项字面），全部消费者（calling 名单/指标豁免/HsMetrics 对照口径/TH-21·34 污染监控的 NTC 识别）随之生效；命中样本逐个 INFO 播报，未命中项 INFO 说明（无对照批次不刷屏）；部分子串不误中（MNTCX 不中 NTC） | 外部服务器实跑：外送平铺对照名带长前缀（如 `..._ZM20260918D_NTC_combined`），整串比对 `"NTC"` 漏排——排除集为空 → NTC 进联合分型、污染监控同时失效（RUN-55） |
 
 ## 5. 统一口径与阈值总表（TH = config.py 镜像）<!-- HUMAN 可改值；MACHINE 同步 config 后过校验 -->
 
@@ -343,7 +344,7 @@ results/260422_20260914/                     Output/260422_20260914/
 | `--input <目录>` | 多批次输入根目录（相对名按 RAW_DATA_DIR 语境解析，不回落 $WORK） | `0_raw_data` |
 | `--batch <批次名>` | 指定单批次（优先于 --input 遍历） | - |
 | `--step <0-6>` | 执行到第几步（§3.1） | `6` |
-| `--samples a,b` / `--exclude-samples NTC` | 样本白名单 / 联合检测排除对照（空串关闭） | 全部 / `NTC` |
+| `--samples a,b` / `--exclude-samples NTC` | 样本白名单 / 联合检测排除对照（空串关闭；命中=整串或 [_\-.] token，不区分大小写，DEC-39） | 全部 / `NTC` |
 | `--workers N` / `--threads N` / `--max-memory NG` | 覆盖资源规划（优先级见 §5.3） | 规划值 |
 | `--resource-profile auto\|low\|high` | 资源档位（§5.3） | `auto` |
 | `--serial` | 强制单样本串行 | - |
@@ -400,7 +401,7 @@ CI（.github/workflows/ci.yml）在 py3.10/3.12 矩阵执行。
 
 ### 9.2 迁移/重建验证顺序（DEC-12）
 
-1. `./run_tests.sh` 全绿（全部用例数见 §9.1 各文件，当前共 171）
+1. `./run_tests.sh` 全绿（全部用例数见 §9.1 各文件，当前共 173）
 2. `cp .env.example .env` 填 webhook → `python3 run_pipeline.py --notify-test`（连通性）
 3. `python3 run_pipeline.py --dry-run --batch <小批次>`（容器/参考文件/路径与资源计划）
 4. `python3 run_pipeline.py --resource-profile low --dry-run`（低配档口径）
@@ -408,7 +409,7 @@ CI（.github/workflows/ci.yml）在 py3.10/3.12 矩阵执行。
 
 ### 9.3 重建完成判据
 
-171 用例 + check_design 全绿；`--version` 输出与本文档 version 一致；dry-run 零落盘；
+173 用例 + check_design 全绿；`--version` 输出与本文档 version 一致；dry-run 零落盘；
 单批次实跑 success 且 Step 6 交付目录含 VCF+tbi+MultiQC，`md5sum -c` 全过。
 
 ## 10. 变更日志（CHANGELOG）<!-- 人机共写：每方改动各记一行 -->
@@ -481,6 +482,8 @@ CI（.github/workflows/ci.yml）在 py3.10/3.12 矩阵执行。
 | 2.27.0 | 2026-09-21 | 机 | DEC-38：step0_scan 通知块移至 md5 块之前，md5 异常摘出启动 pre_anoms（Step0 里程碑三态+P0 失败通知兜底，P0 阻断路径不变）；测试 169→170（TestStartupNotifyOrder 时序锚）；RUN-53 |
 | 2.28.0 | 2026-09-21 | 人 | 启动信息输入大小改二进制（1024）口径 |
 | 2.28.0 | 2026-09-21 | 机 | _fmt_gb→_fmt_gib：÷1024³ 并以 GiB（IEC）标注（曾十进制 1e9 GB，与 ls -lh/du 二进制口径不一致）；日志/启动通知/Step0 里程碑三处同步；测试 170→171（二进制口径锚）；RUN-54 |
+| 2.29.0 | 2026-09-21 | 人 | 修 NTC 识别：排除机制是精确名匹配，长前缀对照名（..._NTC_combined）未被默认 "NTC" 命中，排除集对样本集交集为空 |
+| 2.29.0 | 2026-09-21 | 机 | DEC-39：新 _match_excluded（整串或 [_\-.] token，不区分大小写）；self.excluded 改存命中样本名（消费者集合语义不变全线生效）；命中/未命中 INFO 播报；CLI help 更新；测试 171→173（token 单元锚：长前缀/大小写/部分子串不误中 + 长前缀 NTC E2E 锚：dry-run HC 命令不含对照名且播报命中行）；RUN-55 |
 
 ## 11. 证据索引 <!-- MACHINE -->
 
@@ -489,7 +492,7 @@ CI（.github/workflows/ci.yml）在 py3.10/3.12 矩阵执行。
 | 运行台账（每轮） | pipeline/design_doc/RUN_HISTORY.md |
 | 验收运行（0_raw_data_test） | results/260422_20260914/、results/260422_20260916/ 等（运行日志在各批次 logs/） |
 | 交付 | Output/<批次>_<日期>/ + INDEX.md（累积） |
-| 测试集与 CI | pipeline/tests/（171 用例）+ run_tests.sh + .github/workflows/ci.yml |
+| 测试集与 CI | pipeline/tests/（173 用例）+ run_tests.sh + .github/workflows/ci.yml |
 | 使用说明/与笔记差异 | pipeline/README.md |
 | 环境参数 | pipeline/.env（密钥，600）+ pipeline/.env.example（模板） |
 | 命令参考快照 | pipeline/design_doc/notes_code_reference.md |

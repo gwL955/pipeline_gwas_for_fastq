@@ -698,6 +698,53 @@ class TestBatchExceptionPath(unittest.TestCase):
             self.assertIn("fastq.gz/.fq.gz", r.stdout)   # 指引正确扩展名
 
 
+class TestExcludeMatching(unittest.TestCase):
+
+    def test_match_excluded_token_level(self):
+        """★ 对照排除 token 级匹配锚（DEC-39/RUN-55）：整串相等或 [_\-.] token
+        命中（不区分大小写）——外送长前缀对照名（..._NTC_combined）曾因仅整串
+        比对而漏排：排除集为空 → NTC 进联合分型且 TH-21/34 污染监控同时失效；
+        部分子串不得误中（MNTCX 不中 NTC）"""
+        from run_pipeline import _match_excluded
+        ntc_long = ("202609182149_AE01-231101003_4P260813139US293229A2_B_"
+                    "ZM20260918D_NTC_combined")
+        samples = {ntc_long, "SM1", "SM2_ntc", "MNTCX", "SM3"}
+        self.assertEqual(_match_excluded(samples, ["NTC"]), {ntc_long, "SM2_ntc"})
+        self.assertEqual(_match_excluded(samples, ["SM1", "SM3"]), {"SM1", "SM3"})
+        self.assertEqual(_match_excluded(samples, ["SM"]), set())      # 部分子串不中
+        self.assertEqual(_match_excluded(samples, []), set())
+        self.assertEqual(_match_excluded({"ntc"}, ["NTC"]), {"ntc"})   # 整串不区分大小写
+
+    def test_long_prefix_ntc_excluded_e2e(self):
+        """★ 长前缀 NTC 端到端锚（RUN-55）：外送平铺布局下对照名带长前缀——
+        默认 --exclude-samples NTC 须 token 命中将其排除出 HaplotypeCaller
+        （dry-run 命令行中不得出现该样本名）并播报对照命中行"""
+        import subprocess
+        ntc = ("202609182149_AE01-231101003_4P260813139US293229A2_B_"
+               "ZM20260918D_NTC_combined")
+        with tempfile.TemporaryDirectory() as td:
+            bdir = os.path.join(td, "in", "260921")
+            os.makedirs(bdir)
+            for sm in ("SM1", ntc):
+                for r in ("R1", "R2"):
+                    with open(os.path.join(bdir, f"{sm}_{r}.fastq.gz"), "wb") as f:
+                        f.write(b"@x\nACGT\n+\nIIII\n")
+            env = {**os.environ, **_dep_env(td),
+                   "GWAS_RESULTS": os.path.join(td, "results")}
+            r = subprocess.run(
+                [sys.executable,
+                 os.path.join(os.path.dirname(os.path.dirname(
+                     os.path.abspath(__file__))), "run_pipeline.py"),
+                 "--dry-run", "--resource-profile", "low", "--notify", "off",
+                 "--input", os.path.join(td, "in")],
+                env=env, capture_output=True, text=True, timeout=90)
+            self.assertEqual(r.returncode, 0, r.stdout[-500:])
+            self.assertIn(f"对照样本（排除出联合分型，QC 照跑）: {ntc}", r.stdout)
+            hc_lines = [ln for ln in r.stdout.splitlines() if "HaplotypeCaller" in ln]
+            self.assertTrue(hc_lines)
+            self.assertFalse(any(ntc in ln for ln in hc_lines))   # 不进 HC/联合分型
+
+
 class TestInputSizeFormatting(unittest.TestCase):
 
     def test_fmt_gib_binary_unit(self):

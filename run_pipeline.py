@@ -61,7 +61,8 @@ def parse_args():
                    help="执行到第几步（0=清点合并 … 6=质量汇总，默认 6）")
     p.add_argument("--samples", help="仅处理指定样本（逗号分隔）")
     p.add_argument("--exclude-samples", default="NTC",
-                   help="从联合变异检测排除的对照样本（逗号分隔，默认 NTC；空串关闭）")
+                   help="从联合变异检测排除的对照（逗号分隔，默认 NTC；空串关闭；"
+                        "命中口径=整串或 [_\\-.] token，不区分大小写，DEC-39）")
     p.add_argument("--workers", type=int, help="并行样本数（覆盖资源规划，最高优先）")
     p.add_argument("--threads", type=int, help="每样本线程（覆盖资源规划）")
     p.add_argument("--max-memory", type=int, help="覆盖可用内存探测值（NG）")
@@ -99,6 +100,20 @@ def _parallel(jobs, workers):
             except Exception:   # noqa: BLE001
                 results[sm] = ("EXC", traceback.format_exc())
     return results
+
+
+def _match_excluded(samples, entries):
+    r"""对照排除匹配（DEC-39）：样本名整串相等（不区分大小写），或按 [_\-.]
+    分隔的任一 token 等于排除项——外送长前缀对照名（如 ..._NTC_combined）
+    曾因仅整串比对而漏排：排除集为空 → NTC 进联合分型且 TH-21/34 污染监控
+    同时失效（无 NTC 可查）。部分子串不算命中（MNTCX 不中 NTC）。"""
+    ents = {e.strip().lower() for e in entries if e.strip()}
+    out = set()
+    for sm in samples:
+        toks = {tk.lower() for tk in re.split(r"[_.\-]+", sm) if tk}
+        if sm.lower() in ents or toks & ents:
+            out.add(sm)
+    return out
 
 
 def _fmt_gib(n):
@@ -346,7 +361,18 @@ class BatchCtx:
                                + alerts.artifact_summary(os.path.join(self.work, "fastq_merged", "*_R*.fastq.gz")),
                      log_hint=f"tail -f {self.work}/logs/sample_<样本>.self.log")
 
-        self.excluded = {s.strip() for s in (self.args.exclude_samples or "").split(",") if s.strip()}
+        # 对照排除（DEC-39 token 级）：整串相等或 [_\-.] token 命中（不区分
+        # 大小写）——excluded 存命中的样本名（非排除项字面），全部消费者
+        # （calling 名单/指标豁免/TH-21·34 污染监控/HsMetrics 对照口径）随之生效
+        entries = (self.args.exclude_samples or "").split(",")
+        self.excluded = _match_excluded(self.merged, entries)
+        for sm in sorted(self.excluded):
+            self.log.info(f"对照样本（排除出联合分型，QC 照跑）: {sm}")
+        unmatched = [e.strip() for e in entries
+                     if e.strip() and not _match_excluded(self.merged, [e])]
+        if unmatched:
+            self.log.info(f"排除项未命中任何样本: {', '.join(unmatched)}"
+                          "（本批次无此对照，属正常；命中口径=整串或 [_\\-.] token，不区分大小写）")
 
     # ── step1_qc_trim ──
     def step1_qc_trim(self):
