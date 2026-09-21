@@ -31,9 +31,10 @@ python3 run_pipeline.py --batch 260422
 #    日志全自动落盘（tee 进 results/<批次>_<日期>/logs/run_<时间戳>.log），无需 shell
 #    重定向；实跑控制台在打印日志路径提示行后即静默（v2.13.0），nohup 仅用于后台
 #    防断线，nohup.out 不会再堆积运行日志
-#    v2.23.0 起 nohup 后台全链路免疫终端关闭（DEC-33）：程序启动即忽略 SIGHUP，
-#    GATK 命令带 -Xrs、fastqc 经 _JAVA_OPTIONS 注入——JVM 不再覆盖继承的忽略位
-#    （曾在外部服务器同瞬杀死 4 个 HC JVM，"Hangup" exit=129）
+#    v2.33.0 起启动即脱离控制终端（DEC-43 setsid 新会话）：终端/SSH 关闭的 SIGHUP
+#    无从发出，不依赖子进程信号处置位（v2.29.0 实测 apptainer 容器内会重置继承位，
+#    DEC-33 的 SIG_IGN/-Xrs 防线护不住容器内 JVM，降为纵深防御保留）；交互后台
+#    作业经 fork+setsid 续跑（控制台打印续跑 PID）；前台交互运行保留 Ctrl+C 语义
 nohup python3 run_pipeline.py --input 0_raw_data &
 
 # ④ 低配档核对 / 钉钉测试
@@ -361,7 +362,7 @@ Step3 重复率、Step6 深度/20X/捕获效率、完成通知质量行）与 St
 | 10 | 笔记输出至工作区根部（qc/ bam/ gvcf/ …） | 全部收进 `results/<批次>_<执行日期>/` | 批次隔离与安全边界要求 |
 | 11 | 笔记散述 HsMetrics/捕获口径 | 捕获效率告警 = PCT_SELECTED ≥85%，on-target 不告警（信息指标）（v2.19.0/DEC-29） | 老结论"PCT_SELECTED(25-28%) 不误作捕获效率"系老 panel 观测，已废止——新 panel 下与外送 pct_selected_bases 交叉验证一致（<0.2pp 偏差） |
 | 12 | 笔记 BedToIntervalList 无 `--UNIQUE`/`--DROP_MISSING_CONTIGS` | 固定 `--UNIQUE true --DROP_MISSING_CONTIGS true`（DEC-26） | 新 panel bed 含字典外 ALT contig（否则 PicardException 中断）；重叠/相邻探针区间合并为唯一区间，靶区碱基按唯一口径（实测 31310→18339bp） |
-| 13 | 笔记 JVM 无信号参数 | GATK `--java-options "-Xrs -Xmx…"`；fastqc 命令前缀 `_JAVA_OPTIONS=-Xrs`（DEC-33） | JVM 启动时装自己的 SIGHUP 处理器，覆盖 nohup 经 fork/exec 继承的忽略位——关闭终端曾同瞬杀死 4 个 HC JVM（"Hangup" exit=129，RUN-48）；`-Xrs` 后不装、继承位保留。代价：kill -3 线程转储不可用（改 `jcmd Thread.print`） |
+| 13 | 笔记 JVM 无信号参数 | 启动 setsid 脱离终端（DEC-43 根治）；GATK `-Xrs`/fastqc 注入保留为纵深防御（DEC-33） | JVM 启动时装自己的 SIGHUP 处理器，覆盖 nohup 经 fork/exec 继承的忽略位——关闭终端曾同瞬杀死 4 个 HC JVM（"Hangup" exit=129，RUN-48）；v2.33.0/DEC-43 根治层：ensure_detached setsid 脱离控制终端（实测容器内会重置信号继承位，SIG_IGN/-Xrs 不足以护住容器内 JVM） |
 
 其余分析学内容（命令、参数语义、阈值：fastp length_required 36、bwa `-K 100000000 -Y`、
 HC interval-padding 100、硬过滤 QD2/QUAL30/SOR3/FS60/MQ40/MQRankSum/ReadPosRankSum 与

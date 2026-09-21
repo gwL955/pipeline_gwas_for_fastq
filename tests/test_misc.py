@@ -809,6 +809,71 @@ class TestStartupNotifyOrder(unittest.TestCase):
         self.assertLess(0, md5_i[0])                   # notify 在 md5 之前
 
 
+class TestEnsureDetached(unittest.TestCase):
+    """★ 终端 SIGHUP 根治锚（DEC-43/RUN-59）：脱离控制终端（setsid 新会话）——
+    v2.29.0 实测证明 DEC-33 防线不足：SIG_IGN 传到 sh 层（SigIgn bit0=1）但
+    apptainer 容器内部重置信号继承位，12 个 -Xrs JVM 仍同瞬被杀（Hangup/129）；
+    根治=让 SIGHUP 无从发出，而非逐层对抗处置位"""
+
+    def test_detach_decision_matrix(self):
+        from run_pipeline import _detach_decision as dec
+        self.assertEqual(dec(True, True, False), "stay")        # 前台交互：保留 Ctrl+C
+        self.assertEqual(dec(True, True, True), "stay")
+        self.assertEqual(dec(False, False, True), "already")    # 外部 setsid：已免疫
+        self.assertEqual(dec(False, False, False), "setsid")    # 脚本/cron：直接建会话
+        self.assertEqual(dec(True, False, True), "fork_setsid") # 会话首+有终端：fork
+        self.assertEqual(dec(True, False, False), "setsid")     # 非交互 shell 后台
+        # 交互 shell 后台作业（作业首=组长）运行时 setsid EPERM → 落入 fork 路径
+
+    def test_ensure_detached_execution_paths(self):
+        import run_pipeline as rp
+        with mock.patch.object(os, "open", side_effect=OSError), \
+                mock.patch.object(os, "getsid", return_value=999), \
+                mock.patch.object(os, "setsid") as m_sid:
+            note = rp.ensure_detached()
+            self.assertIn("setsid", note)
+            m_sid.assert_called_once()                     # 无终端且非会话首：直接 setsid
+        with mock.patch.object(os, "open", side_effect=OSError), \
+                mock.patch.object(os, "getsid", return_value=os.getpid()), \
+                mock.patch.object(os, "setsid") as m_sid2:
+            note = rp.ensure_detached()
+            self.assertIn("独立会话", note)                  # 已是会话首：不再动
+            m_sid2.assert_not_called()
+        # fork 路径（子进程视角：首次 setsid EPERM → fork 返回 0 → 二次 setsid 建会话）
+        calls = {"n": 0}
+
+        def _sid_flaky():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise OSError("EPERM")          # 首调失败（作业首=组长）
+
+        with mock.patch.object(os, "open", side_effect=OSError), \
+                mock.patch.object(os, "getsid", return_value=999), \
+                mock.patch.object(os, "setsid", side_effect=_sid_flaky), \
+                mock.patch.object(os, "fork", return_value=0), \
+                mock.patch.object(os, "_exit") as m_exit:
+            note = rp.ensure_detached()
+            self.assertIn("fork+setsid", note)
+            self.assertEqual(calls["n"], 2)                 # 二次调用即子进程建会话
+            m_exit.assert_not_called()                      # 子进程不退出，继续跑
+        # fork 路径（父进程视角：立即 _exit(0) 让 shell 收尸，不再 setsid）
+        calls2 = {"n": 0}
+
+        def _sid_flaky2():
+            calls2["n"] += 1
+            if calls2["n"] == 1:
+                raise OSError("EPERM")
+
+        with mock.patch.object(os, "open", side_effect=OSError), \
+                mock.patch.object(os, "getsid", return_value=999), \
+                mock.patch.object(os, "setsid", side_effect=_sid_flaky2), \
+                mock.patch.object(os, "fork", return_value=12345), \
+                mock.patch.object(os, "_exit") as m_exit2:
+            rp.ensure_detached()
+            m_exit2.assert_called_once_with(0)              # 父进程即退（_exit 被mock
+            # 后不真正终止，后续语句不构成行为断言——真实执行中 _exit 即刻退出）
+
+
 class TestSighupHardening(unittest.TestCase):
     """★ SIGHUP 防护锚（DEC-33/RUN-48）：nohup 只让 Python 忽略 SIGHUP，
     SIG_IGN 经 fork/exec 继承本可覆盖 sh/singularity/bcftools 等全部子进程，

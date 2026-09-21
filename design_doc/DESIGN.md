@@ -3,7 +3,7 @@
 ```yaml
 # ---- design-meta（机器可解析锚点，勿手改格式；版本规则见 §0）----
 doc: GWAS-pipeline-design
-version: 2.32.0
+version: 2.33.0
 updated: 2026-09-19
 owner_human: gewenlong
 owner_machine: ZCode(GLM)
@@ -169,7 +169,7 @@ Step 6 的矩阵裁决/每样本重建与 MultiQC 串行。HC `--native-pair-hmm
 | DEC-30 | **告警越界样本全点名（v2.20.0）**：check_fastp/check_flagstat/check_dup/check_capture 由"每指标只点名最差一个样本（_min_item/_max_item）"改为逐越界样本一行、名字序全点名（新辅助 `_violating`，方向参数 below/>）；例外：fastp 保留率 80-95% 提示带为 OK 级聚合一行点名（防提示刷屏）；批级指标（Ti/Tv、call rate、深度 CV）单值无点名问题；check_reads_low 本就逐样本；`_min_item` 保留用于指标播报（Step3 ELS 最小值） | RUN-43 复盘：260918 自测三样本 on-target 0.58/0.59/0.59 全部越界，钉钉只报"TG017 0.58%"一行——"每指标报最差"被代表性误读为"只有一个样本坏"，实为批性口径坍缩；全点名后告警行数上限=批内越界样本数×越界指标数，本仓库批次规模（2-13 样本）可控 |
 | DEC-31 | **非样本条目剔除 + 对照样本告警豁免 + 保留率提示带下调（v2.21.0）**：①scanner 布局识别后剔除 Illumina 下机自带的 Undetermined（BCLConvert 未匹配 index 的 reads；样本名不区分大小写等于 `undetermined` 即剔除，常量 `IGNORED_SAMPLES` 便于日后扩充）——独立 ignored 清单（INFO 日志 + run_summary `samples.ignored` 追溯），不算 invalid、不触发告警，杜绝其进入联合分型/基因型矩阵/Output 交付；②对照样本（`--exclude-samples`，默认 NTC）豁免样本级告警：check_reads_low 对低 reads 对照降级为 OK 级提示行逐个播报实际数值（低 reads 属阴性对照正常态），check_fastp（含提示带统计）/check_flagstat/check_dup/check_capture/check_recal_low/check_depth_cv 与 step2 内联 mapped<TH-05 P1 名单直接跳过对照（实验样本口径指标对对照无统计意义）；新参数均带默认值 `excluded=()`，NTC 仍走全流程 QC（mosdepth 深度供 TH-21 用）；污染监控不豁免，仍由 check_ntc（TH-21 靶区深度）与 check_ntc_reads（TH-34 占批次中位）专属口径负责；③TH-02 FASTP_RETENTION_WARN 95→90，提示带变为 TH-03~02 区间（80-90%） | RUN-45 实跑事故复盘：批次 260918 识别出 49 个"样本"（含 Undetermined 2300 万未匹配 index reads，一路进联合分型/矩阵/Output 污染整批，跑到 Step 3 手动中断）；Step1 钉钉 [P1] 两误报——NTC reads 32 被"上样不足"P1 误报（阴性对照 reads 近 0 属正常）、Undetermined 保留率 73.37% 被 P2 误报（样本级检查不感知 excluded 集合）；提示带把全部 49 样本点名一遍（实测保留率全批 92.18-94.47%，95 线对本 panel 定高失去区分度） |
 | DEC-32 | **指标播报对照豁免 + ELS 统计扩容 + 步骤总数播报（v2.22.0）**：①里程碑与全流程汇总"指标:"行的**样本级指标均值一律排除对照**（`_avg(d, excluded)`：Step2 mapped/pp、Step3 dup、Step6 depth/20X/捕获效率、完成通知质量行）——DEC-31 只豁免了告警点名，播报均值此前仍含 NTC（reads 近 0 拉低批均值）；②Step3 ELS 播报由"ELS 最小 <值>"扩为**均值/方差/最低值+对应样本**三元组（新 `alerts.els_summary(els, excluded)`，科学计数法，方差取总体方差÷n 与深度 CV 同口径），排除对照——NTC 的 ELS 无统计意义且必然占据最低值（曾被误读为"文库复杂度不足"）；`_min_item` 删除（无引用）；③里程碑标题尾部增**"（共 X 步）"**（`step_milestone(total_steps=)`，X=args.step：**Step 0 为清点预备步不计入，全流程=6**——首版误用 args.step+1 显示 7，RUN-47 依用户口径修正）；④例外：Step1 里程碑 fastp 保留率/Q30 均值保留含对照原口径（修剪口径对对照同样成立，reads 已由 DEC-31 OK 提示行专属播报）；对照清单写入 run_summary `samples.excluded` | RUN-46 用户复盘：Step3 钉钉"ELS 最小"被 NTC 的极小 ELS 占据（阴性对照 reads 近 0 → 文库复杂度误判），并要求检查其余步骤同类误报——排查结论：Step2 mapped/pp、Step3 dup、Step6 depth/20X/捕获效率与全流程完成通知的质量均值行同样含 NTC 失真（均已修）；Step4 播报为流程健康度计数、Step5 为 cohort 级（对照已排除出 calling）、Step0 无样本级均值，不受影响 |
-| DEC-33 | **后台运行 SIGHUP 全链路防护（v2.23.0）**：①`run_pipeline.main()` 启动即 `signal(SIGHUP, SIG_IGN)`（代码级 nohup，未套 nohup 的后台启动同样免疫，SIG_IGN 经 fork/exec 继承覆盖 sh/singularity/bcftools/bwa 等全部非 JVM 子进程；控制台写失败由 TeeStream 兜底只落盘）；②GATK 全部 10 类命令 `--java-options "-Xrs -Xmx…"`——JVM 启动时对 SIGHUP 安装自己的处理器，**覆盖 nohup 继承来的忽略位**（nohup 跑 Java 的经典坑），`-Xrs` 后 JVM 不装信号处理器、继承位得以保留；③fastqc 同为 JVM 但启动器不收 `--java-options` → 命令前缀 `_JAVA_OPTIONS=-Xrs` 注入（singularity 默认透传宿主环境进容器；代价：每条命令 stderr 多一行 "Picked up" 提示）；④`-Xrs` 代价：SIGQUIT/SIGTERM 优雅停机与 kill -3 线程转储不可用（排障改用 `jcmd Thread.print`）——流程超时兜底本就 SIGKILL、无依赖 shutdown hooks 的中间产物，无影响 | RUN-48 外部服务器实跑事故：`nohup python3 run_pipeline.py … &` 启动，00:57:42 关闭启动命令所在终端（WSL2 下关 Windows Terminal 标签页）→ 4 个正在跑 HC 的 JVM 同瞬打印 "Hangup" 以 exit=129（=128+SIGHUP）退出；后续顶上来的 worker 与全部 MT 样本无一失败（数据/流程本身无问题，纯外部信号事件）；4 样本缺 gVCF → 批次 partial → 交付 zip 推送被拦（DEC-24 口径：仅 success 批次自动推送，属有意设计） |
+| DEC-33 | **后台运行 SIGHUP 全链路防护（v2.23.0）**：①`run_pipeline.main()` 启动即 `signal(SIGHUP, SIG_IGN)`（代码级 nohup，未套 nohup 的后台启动同样免疫，SIG_IGN 经 fork/exec 继承覆盖 sh/singularity/bcftools/bwa 等全部非 JVM 子进程；控制台写失败由 TeeStream 兜底只落盘）；②GATK 全部 10 类命令 `--java-options "-Xrs -Xmx…"`——JVM 启动时对 SIGHUP 安装自己的处理器，**覆盖 nohup 继承来的忽略位**（nohup 跑 Java 的经典坑），`-Xrs` 后 JVM 不装信号处理器、继承位得以保留；③fastqc 同为 JVM 但启动器不收 `--java-options` → 命令前缀 `_JAVA_OPTIONS=-Xrs` 注入（singularity 默认透传宿主环境进容器；代价：每条命令 stderr 多一行 "Picked up" 提示）；④`-Xrs` 代价：SIGQUIT/SIGTERM 优雅停机与 kill -3 线程转储不可用（排障改用 `jcmd Thread.print`）——流程超时兜底本就 SIGKILL、无依赖 shutdown hooks 的中间产物，无影响 | RUN-48 外部服务器实跑事故：`nohup python3 run_pipeline.py … &` 启动，00:57:42 关闭启动命令所在终端（WSL2 下关 Windows Terminal 标签页）→ 4 个正在跑 HC 的 JVM 同瞬打印 "Hangup" 以 exit=129（=128+SIGHUP）退出；后续顶上来的 worker 与全部 MT 样本无一失败（数据/流程本身无问题，纯外部信号事件）；4 样本缺 gVCF → 批次 partial → 交付 zip 推送被拦（DEC-24 口径：仅 success 批次自动推送，属有意设计）。**v2.33.0/DEC-43 修订**：实测（RUN-59）SIG_IGN 传到 sh 层但 apptainer 容器内重置继承位，本防线护不住容器内 JVM——根治改由 ensure_detached setsid 脱离控制终端承担，本层降为纵深防御 |
 | DEC-34 | **Step5 失败连锁修复 + cohort 复跑守卫（v2.23.0）**：①每样本 hardfiltered/PASS 拆分（`view -s`）名单改用**实际进入 cohort 的 hc_ok**——曾误用 HC 失败前的原始 calling，失败样本不在 cohort VCF 头里，`bcftools view -s` 连锁报"样本不存在"（exit=255）；②**cohort 复跑守卫**：gvcf.list 重新生成后，读现存关键 VCF（cohort.g.vcf.gz / cohort.PASS.vcf.gz）header 样本清单与本次 hc_ok 比对（DEC-05 sorted 同口径），不一致即作废 cohort/matrix/per_sample_vcf 全部派生产物重算（均可在链上重算，REQ-04；dry-run / header 不可读 → 不判不作废零副作用）；**RUN-49 补漏：qc/bcftools_stats/cohort.*.stats 与 qc/multiqc/ 一并作废（multiqc_data/ 子目录整树删）——run_stats 按产物非空幂等、run_multiqc 按报告存在幂等，不删则陈旧 Ti/Tv 统计与陈旧 MultiQC 报告被 SKIP 沿用进通知与交付** | RUN-48 连锁复盘：拆分名单 bug 致 4 失败样本各白跑 2 条 `view -s` 报错；更深层：同日断点续跑补回 HC 失败样本后 gvcf.list 样本集已变，但旧 cohort 链产物非空仍被幂等 SKIP——旧口径矩阵按旧列数裁决（列数守卫使每行原样保留）、补回样本 view -s 静默失败不进 adj_vcfs，交付残缺还报 success——"断点续跑即可恢复"的承诺在样本集变化场景失效，须守卫作废重算 |
 | DEC-35 | **按步骤类型分化并行 workers（v2.24.0）**：`plan` 新增 `workers_gatk`（Step3/4/5-每样本HC/6：GATK 单线程类，每路峰值 ≈1.3×gatk 堆、CPU 每路预算 max(2, hmm 档) 核）与 `workers_io`（Step0 md5/合并 + Step1 fastp/fastqc：每路 ~2G、≤ GATK 类）；比对类 `workers` 与 bwa/-K/-Y、sort、fastp/fastqc/mosdepth 线程、GATK/cohort -Xmx、幂等 SKIP、cgroup/WSL2 探测、快速失败、`--workers` 最高优先级（三类同步覆盖）全部维持不变；HC `--native-pair-hmm-threads` 由固定 min(4, T/2) 改为 min(期望档, ⌊可用核/workers_gatk⌋)——保证 workers_gatk×hmm ≤ 可用核防超订阅，50 核机期望档仍为 4（单样本 HC 耗时不变，批耗时按波数线性折算）；table()/run_summary/启动与完成通知同步展示三类推导 | 50 线程/305.7G 机 48 样本批次实测：GATK 单线程工具以比对类 4 路并行时整机 CPU ~10%、内存 ~40G/290G——比对类 workers 被每路 17G bwa 索引峰值钉死（4=290//20.5），而 GATK 阶段索引非工作集；全程 6h53m 中 Step3 16min/Step4 79min/Step5 206min/Step6 34min 全部受 workers=4 限制；分化后 50 核机 GATK 类 12 路（min(48//4, 290//10.4)）、IO 类 12 路，预计全程 ~3.5h（HC 206→69min、BQSR 79→26min） |
 | DEC-36 | **md5 清单识别放宽 + 校验三态（v2.25.0）**：清单不再限死 `md5sum.txt`——识别口径=文件名 md5 开头、txt 结尾（均不区分大小写，覆盖 MD5.txt/MD5清单.TXT 等厂商变体）、体积 <TH-37（500KB，防同名大文本数据文件误认），多候选取字典序首个（WARN 点名忽略其余）；校验三态 OK / FAIL / SKIPPED——无清单跳过校验（此前通知恒显"md5 OK"，未校验也报 OK 有误导），有清单且失败维持 P0 整批中断（DEC-21）；Step0 里程碑通知 md5 字段按三态播报 | 厂商交付清单命名不一（md5.txt/MD5清单.txt 等），旧口径漏检即静默跳过且通知误报 OK；用户指定识别口径与三态语义（RUN-51） |
@@ -179,6 +179,7 @@ Step 6 的矩阵裁决/每样本重建与 MultiQC 串行。HC `--native-pair-hmm
 | DEC-40 | **Step3 通知加入批内变异 CV（v2.30.0）**：去重里程碑 metrics 行增「批内变异 CV x.x%（阈值 20%）」（alerts.cv_of，总体方差口径同 TH-35 深度 CV，排除对照、样本 <2 显 n/a 不判）；超 TH-38（DUP_CV_P1=0.2，P1 级）→ 异常行点名极值区间——重复率是建库/上样环节的指纹，批内离散比 Step6 深度 CV（TH-35 P2）早三步暴露批次异质 | 用户要求（RUN-56）：Step3 钉钉通知加入批内变异 CV 指标，P1 阈值 20% |
 | DEC-41 | **Step3 统计播报扩容（v2.31.0）**：①重复率分布——新增 `dup_stats_summary`："min-max x-x%｜SD x%｜P25/P50/P75 x/x/x%"（分位=statistics.quantiles 线性插值 inclusive 口径；总体方差 SD 与 CV 同口径；排除对照；<2 样本 n/a），与均值行、批内 CV（TH-38）共同刻画批次重复率形态；②ELS 最低值附 **Z 值**（`（Z=±x.x）`=偏离均值的 SD 倍数，直观判断该样本文库复杂度是否离群；SD=0 无法定标不附） | 用户要求（RUN-57）：重复率加分位数/min/max/SD，ELS 最小值显示 Z 值 SD |
 | DEC-42 | **ELS 最低值 Z 告警（v2.32.0）**：`check_els_min_z`——ELS 最低样本 Z ≤ TH-39（-3 SD）→ P1，消息点名样本/Z 值/阈值/ELS 与批均值对比，附建库-上样环节核查指引；与 v2.31.0 的播报型 Z 值（els_summary 附注）配套成"可见+可判"；总体 SD 口径下单点 Z 极值=-√(n-1)，批内 <10 样本数学上不可达阈值（属分布性质非漏报）；对照排除、SD=0 不判 | 用户要求（RUN-58）：ELS 最小值 Z 值设告警阈值 -3 SD、级别 P1 |
+| DEC-43 | **终端 SIGHUP 根治：启动即脱离控制终端（v2.33.0）**：`ensure_detached()` 在 main() 最前（parse_args/capture_stdio/线程之前）执行——`/dev/tty` 判前台（前台交互保留 Ctrl+C 语义不脱离）；无终端且非会话首 → `os.setsid()` 直接建新会话；已是会话首（外部 setsid）→ 天然免疫；进程组长（交互 shell 后台作业，直接 setsid 必 EPERM）→ **fork+setsid**（父进程即退，子进程续跑并打印新 PID）。新会话无控制终端 → 终端/SSH 关闭的 SIGHUP **无从发出**，不再依赖任何子进程的信号处置位（含容器内部链）。SIG_IGN（主进程直收信号兜底）与 GATK -Xrs 降为纵深防御层 | RUN-59 实测证伪 DEC-33 完备性：v2.29.0 下存活 sh 子进程 SigIgn bit0=1（SIG_IGN 确实传到 sh 层），但 apptainer 容器内部进程链重置信号继承位，12 个 GATK JVM（7 ApplyBQSR+5 BaseRecalibrator）同瞬 17:22:18 被 SIGHUP 杀死（"Hangup" exit=129），主进程存活——处置位对抗不可行，唯一可靠口径是让信号无从发出 |
 
 ## 5. 统一口径与阈值总表（TH = config.py 镜像）<!-- HUMAN 可改值；MACHINE 同步 config 后过校验 -->
 
@@ -408,7 +409,7 @@ CI（.github/workflows/ci.yml）在 py3.10/3.12 矩阵执行。
 
 ### 9.2 迁移/重建验证顺序（DEC-12）
 
-1. `./run_tests.sh` 全绿（全部用例数见 §9.1 各文件，当前共 180）
+1. `./run_tests.sh` 全绿（全部用例数见 §9.1 各文件，当前共 182）
 2. `cp .env.example .env` 填 webhook → `python3 run_pipeline.py --notify-test`（连通性）
 3. `python3 run_pipeline.py --dry-run --batch <小批次>`（容器/参考文件/路径与资源计划）
 4. `python3 run_pipeline.py --resource-profile low --dry-run`（低配档口径）
@@ -416,7 +417,7 @@ CI（.github/workflows/ci.yml）在 py3.10/3.12 矩阵执行。
 
 ### 9.3 重建完成判据
 
-180 用例 + check_design 全绿；`--version` 输出与本文档 version 一致；dry-run 零落盘；
+182 用例 + check_design 全绿；`--version` 输出与本文档 version 一致；dry-run 零落盘；
 单批次实跑 success 且 Step 6 交付目录含 VCF+tbi+MultiQC，`md5sum -c` 全过。
 
 ## 10. 变更日志（CHANGELOG）<!-- 人机共写：每方改动各记一行 -->
@@ -497,6 +498,8 @@ CI（.github/workflows/ci.yml）在 py3.10/3.12 矩阵执行。
 | 2.31.0 | 2026-09-21 | 机 | DEC-41：alerts.dup_stats_summary（min-max/SD/P25-P50-P75，inclusive 分位）接入 step3 metrics 行；els_summary 最低值附（Z=±x.x）（SD=0 不附）；测试 175→178（Z 值口径锚：-1.0 精确值/全等不附/单值不附 + 分布字段锚：inclusive 分位/对照排除/<2 None）；RUN-57 |
 | 2.32.0 | 2026-09-21 | 人 | ELS 最小值的 Z 值设告警阈值 -3 SD，级别 P1 |
 | 2.32.0 | 2026-09-21 | 机 | DEC-42/TH-39：config.ELS_MIN_Z_P1=-3.0（镜像集登记）+ alerts.check_els_min_z（Z≤阈值 → P1，点名样本/Z/阈值/ELS vs 批均值+核查指引）；step3 anomalies 接入；测试 178→180（10+1 样本 z=-3.2 触发锚/温和离散·SD=0·对照排除·单样本不触发锚）；RUN-58 |
+| 2.33.0 | 2026-09-21 | 人 | 远程实测证伪 DEC-33 防线：SIG_IGN 传到 sh 层但 apptainer 容器内重置继承位，12 个 -Xrs JVM 同瞬被 SIGHUP 杀死——需根治：脱离控制终端使信号无从发出 |
+| 2.33.0 | 2026-09-21 | 机 | DEC-43：ensure_detached（前台保留/setsid/外部 setsid 免疫/作业组长 fork+setsid 四路）接 main() 最前，[启动] 行播报去向；ignore_sighup/-Xrs 降为纵深防御（docstring、gatk 头注、README §1/§8 同步修订）；测试 180→182（决策矩阵六格锚+执行路径四视角 mock 锚）；本机实测无 tty→fork+setsid 打印续跑 PID、伪终端前台→保留终端语义；RUN-59 |
 
 ## 11. 证据索引 <!-- MACHINE -->
 
@@ -505,7 +508,7 @@ CI（.github/workflows/ci.yml）在 py3.10/3.12 矩阵执行。
 | 运行台账（每轮） | pipeline/design_doc/RUN_HISTORY.md |
 | 验收运行（0_raw_data_test） | results/260422_20260914/、results/260422_20260916/ 等（运行日志在各批次 logs/） |
 | 交付 | Output/<批次>_<日期>/ + INDEX.md（累积） |
-| 测试集与 CI | pipeline/tests/（180 用例）+ run_tests.sh + .github/workflows/ci.yml |
+| 测试集与 CI | pipeline/tests/（182 用例）+ run_tests.sh + .github/workflows/ci.yml |
 | 使用说明/与笔记差异 | pipeline/README.md |
 | 环境参数 | pipeline/.env（密钥，600）+ pipeline/.env.example（模板） |
 | 命令参考快照 | pipeline/design_doc/notes_code_reference.md |

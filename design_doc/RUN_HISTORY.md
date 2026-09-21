@@ -81,6 +81,8 @@
 
 | RUN-58 | 09-21 1x:xx | 用户指示：ELS 最小值的 Z 值设置告警阈值 -3 SD，级别 P1 | ✅ | DEC-42/TH-39：config.ELS_MIN_Z_P1=-3.0（check_design 镜像集登记）；alerts.check_els_min_z——ELS 最低样本 Z ≤ 阈值 → P1（消息点名样本/Z 值/阈值/ELS vs 批均值，附建库-上样环节核查指引），对照排除、SD=0 不判；step3 anomalies 链接入（与 v2.31.0 播报型 Z 值配套：els_summary 始终可见、check 只在越界报警）。**口径注记**：总体 SD 下单点 Z 极值=-√(n-1)，批内 <10 样本数学上不可能达到 -3（分布性质非漏报，已入 DEC/TH 说明）；49 样本批次（如 260918）可正常触发。测试 178→180（TestElsMinZP1：10 同值+1 离群 → z=-√10≈-3.2 触发 P1 全字段锚；温和离散/SD=0/对照排除/单样本不触发） | alerts.py、run_pipeline.py、config.py、check_design.py；design_doc/DESIGN.md DEC-42/TH-39/CHANGELOG 2.32.0；tests/test_alerts.py |
 
+| RUN-59 | 09-21 2x:xx | 远程服务器（v2.29.0）新报告+实测证据：17:22:18 同瞬 12 个 GATK JVM（7 ApplyBQSR+5 BaseRecalibrator）被杀（"Hangup" exit=129），主进程存活且同秒续起新任务；实测存活 sh 子进程 SigIgn bit0=1——SIG_IGN 确实经 fork/exec 传到 sh 层，但 apptainer 容器内部进程链重置信号继承位，-Xrs 只管 JVM 装不装 handler——**DEC-33 防线被证伪**（并修正上一轮"必是旧版本"的误判）。用户结论：防线无效 | ✅ | DEC-43 根治：不在处置位上对抗，让 SIGHUP 无从发出——ensure_detached() 于 main() 最前执行（parse_args/capture_stdio/线程之前）：/dev/tty 判前台（前台交互保留 Ctrl+C 语义）；无终端非会话首→os.setsid()；外部 setsid（已是会话首）→天然免疫；进程组长（交互 shell 后台作业，直接 setsid 必 EPERM）→fork+setsid（父进程即退 shell 收尸，子进程续跑并打印新 PID）——新会话无控制终端，终端/SSH 关闭的 SIGHUP 不再发出；SIG_IGN 与 -Xrs 降为纵深防御（ignore_sighup/gatk 头注/README §1 §8/DEC-33 行同步修订）。测试 180→182（决策矩阵六格+执行路径四视角 mock）；本机实测：无 tty → fork+setsid 打印续跑 PID、script 伪终端前台 → 保留终端语义；test_misc 全部 46 用例（含 E2E 子进程）不受影响。恢复指引：远程 git pull ≥本版后重跑同命令（12 样本死在 Step4，recal/BQSR 产物缺失自动补跑） | run_pipeline.py；modules/gatk.py；design_doc/DESIGN.md DEC-43/DEC-33 修订/CHANGELOG 2.33.0；tests/test_misc.py |
+
 ## 三、指标速查（最终有效轮：RUN-08/15 数据）<!-- MACHINE -->
 
 | 批次 | 样本 | fastp保留率 | mapped | dup | 20X | raw SNP/INDEL | PASS SNP/INDEL | Ti/Tv |

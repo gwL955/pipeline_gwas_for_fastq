@@ -1349,14 +1349,68 @@ def _notify_result(batch, bdata, plan, log):
     dingtalk.notify(title, text, logger=log)
 
 
+def _detach_decision(have_ctty, foreground, session_leader):
+    """脱离终端的策略矩阵（DEC-43，纯函数供测试）：
+    stay=前台交互保留终端语义（Ctrl+C 可用）；already=已在独立会话（外部
+    setsid）天然免疫；setsid=可直接建新会话；fork_setsid=交互 shell 后台作业
+    （作业首即进程组长，直接 setsid 必 EPERM）→ fork 出子进程续跑再 setsid"""
+    if have_ctty and foreground:
+        return "stay"
+    if session_leader:
+        return "already" if not have_ctty else "fork_setsid"
+    return "setsid"
+
+
+def ensure_detached():
+    """终端 SIGHUP 根治（DEC-43/RUN-59）：脱离控制终端——setsid 建立新会话后，
+    终端/SSH 会话关闭的 SIGHUP 根本不会发往本进程树，不再依赖任何子进程的
+    信号处置位。背景：v2.29.0 实跑证明 DEC-33 防线不足——主进程 SIG_IGN 确实
+    经 fork/exec 传到 sh 层（实测存活 sh 的 SigIgn bit0=1），但 apptainer 容器
+    内部进程链会重置信号继承位，12 个 GATK JVM（-Xrs）仍同瞬被杀（"Hangup"
+    exit=129）；在信号处置位上逐层对抗不可行，唯一可靠口径是让信号无从发出。
+    前台交互运行不脱离（用户在看着，Ctrl+C/Ctrl+\\ 语义保留）"""
+    try:
+        tty = os.open("/dev/tty", os.O_RDONLY)
+    except OSError:
+        tty = None                  # 无控制终端（cron/服务/已 setsid）
+    have_ctty, foreground = tty is not None, False
+    if have_ctty:
+        try:
+            foreground = os.tcgetpgrp(tty) == os.getpgrp()
+        except OSError:
+            pass
+        finally:
+            os.close(tty)
+    session_leader = os.getsid(0) == os.getpid()
+    plan = _detach_decision(have_ctty, foreground, session_leader)
+    if plan == "stay":
+        return "前台交互运行：保留终端语义（Ctrl+C 可用），不脱离控制终端"
+    if plan == "already":
+        return "已在独立会话（外部 setsid）：终端 SIGHUP 天然免疫"
+    if plan == "setsid":
+        try:
+            os.setsid()
+            return "setsid：新会话已建立，脱离控制终端（SIGHUP 根治，DEC-43）"
+        except OSError:
+            pass                    # 竞态失手 → 落入 fork+setsid
+    # fork+setsid（setsid(1) 同法）：父进程即退（shell 收尸、作业即刻"完成"），
+    # 子进程必非组长、setsid 必成；须在 capture_stdio/任何缓冲与线程之前调用
+    sys.stdout.flush()
+    sys.stderr.flush()
+    pid = os.fork()
+    if pid > 0:
+        os._exit(0)
+    os.setsid()
+    return (f"fork+setsid：新会话已建立（续跑 PID {os.getpid()}），"
+            "脱离控制终端（SIGHUP 根治，DEC-43）")
+
+
 def ignore_sighup():
-    """启动即忽略 SIGHUP——代码级 nohup（DEC-33/RUN-48）：关闭启动命令所在的
-    终端/SSH 会话时，内核向会话与前台进程组发 SIGHUP；nohup 只让本进程忽略，
-    而 SIG_IGN 经 fork/exec 继承即可覆盖 sh/singularity/bcftools 等全部子进程，
-    唯独 JVM 启动时会安装自己的 SIGHUP 处理器覆盖继承位（除非 -Xrs）——曾在
-    Step 5 同瞬杀死 4 个 HC JVM（"Hangup"，exit=129）。GATK 命令已全部加 -Xrs
-    （modules/gatk），fastqc 经 _JAVA_OPTIONS 注入；此处兜底主进程——未套
-    nohup 的后台启动同样免疫。控制台输出由 TeeStream 兜底（写失败只落盘）。"""
+    """启动即忽略 SIGHUP——纵深防御第二层（DEC-33/RUN-48；根治见 DEC-43
+    ensure_detached：脱离控制终端使 SIGHUP 无从发出）。本层兜底**直接发往
+    本进程**的 SIGHUP（如手工 kill -HUP、个别终端实现的会话广播）；子进程
+    继承链对 apptainer 容器内 JVM 无效（容器内部重置信号继承位，RUN-59
+    实测），容器内保护依赖 ensure_detached 的"无信号"而非处置位。"""
     try:
         signal.signal(signal.SIGHUP, signal.SIG_IGN)
     except (AttributeError, ValueError, OSError):
@@ -1379,6 +1433,9 @@ def guard_host_python():
 
 def main():
     guard_host_python()
+    # 脱离控制终端须在 parse_args/capture_stdio/任何缓冲与线程之前（DEC-43）；
+    # 前台交互自动保留终端语义
+    print(f"[启动] {ensure_detached()}")
     ignore_sighup()
     args = parse_args()
 

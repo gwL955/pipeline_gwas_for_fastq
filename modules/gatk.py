@@ -5,11 +5,13 @@ SelectVariants / VariantFiltration / CollectHsMetrics 分函数 + interval_list 
 命令与笔记《3-去重+校准》《4-变异检测》《5-测序质量》逐字对应；
 笔记中写死的 -Xmx2g/-t 8 等资源参数由 resource.py 规划值代入（有意工程化，见 README）。
 
-全部命令固定 -Xrs（DEC-33/RUN-48）：JVM 启动时对 SIGHUP 安装自己的处理器，
-覆盖 nohup 经 fork/exec 继承的忽略位——nohup 后台跑 Java 的经典坑（外部服务器
-实跑 Step 5 四个 HC JVM 同瞬 "Hangup" exit=129）；-Xrs 后 JVM 不装信号处理器，
-继承的 SIG_IGN 得以保留。代价：SIGQUIT/SIGTERM 优雅停机与 kill -3 线程转储
-不可用（排障改用 jcmd Thread.print），流程超时兜底本就 SIGKILL，无影响。"""
+全部命令固定 -Xrs（DEC-33/RUN-48；定位修订 DEC-43/RUN-59）：JVM 启动时对
+SIGHUP 安装自己的处理器，覆盖继承的忽略位——-Xrs 使其不装。v2.29.0 实测证明
+这只是纵深防御的第二层：apptainer 容器内部进程链会重置信号继承位，SIG_IGN 与
+-Xrs 都护不住容器内 JVM（12 个 GATK 同瞬 "Hangup" exit=129）——根治层是
+run_pipeline.ensure_detached() 的 setsid 脱离控制终端（SIGHUP 无从发出）。
+代价：SIGQUIT/SIGTERM 优雅停机与 kill -3 线程转储不可用（排障改用
+jcmd Thread.print），流程超时兜底本就 SIGKILL，无影响。"""
 
 import os
 
