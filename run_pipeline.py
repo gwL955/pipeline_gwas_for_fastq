@@ -183,6 +183,7 @@ class BatchCtx:
     # ── step0_scan ──
     def step0_scan(self):
         """Step 0：清点/md5/磁盘依赖与样本名预检（DEC-19：P0 阻断）/Lane 合并/samples.tsv。
+        启动通知先于 md5 校验发出——第一条消息必须是批次启动信息（DEC-38）。
         无有效样本时返回 bdata（批次 skipped），正常返回 None。"""
         self._t0 = time.time()
         scan = scanner.scan_batch(self.batch_dir)
@@ -265,18 +266,10 @@ class BatchCtx:
         for lv, msg in pre_anoms:
             (self.log.error if lv == "P0" else self.log.warn)(f"[开跑前-{lv}] {msg}")
 
-        # md5 完整性校验：有清单且失败=输入数据损坏，属"严重影响分析"——P0 整批
-        # 阻断（v2.9.0 DEC-21，原为剔除该样本继续；anom 随启动通知可见）；
-        # 清单识别与三态（OK/FAIL/SKIPPED 无清单跳过）见 DEC-36
-        md5_failed, md5_state = set(), "SKIPPED"
-        if not self.args.dry_run:
-            md5_failed, _, md5_state = scanner.verify_md5(self.batch_dir, self.log,
-                                                          workers=self.plan.workers_io)
-            for sm in sorted(md5_failed & set(valid)):
-                self.log.error(f"md5 校验失败，样本 {sm} 输入数据损坏")
-                pre_anoms.append(("P0", f"{sm} md5 校验失败（输入数据损坏）"))
-
-        # 启动通知（样本数/输入体量/资源计划 + 开跑前检查结论）
+        # 启动通知（样本数/输入体量/资源计划 + 开跑前检查结论）——**第一条消息，
+        # 先于 md5 校验发出（DEC-38）**：md5 哈希 GB 级输入可达数分钟，期间群里
+        # 应已收到启动信息；md5 结论改由 Step0 里程碑三态（DEC-36）与
+        # P0 失败通知兜底，不阻塞启动播报
         if self.notify_on:
             p = self.plan
             lvl = alerts.worst_level(pre_anoms)
@@ -294,6 +287,17 @@ class BatchCtx:
                 body += "\n\n异常: 无"
             body += f"\n\n产物: {self.work}"
             dingtalk.notify(f"[GWAS][{lvl}] {self.batch}批次 · 启动", body, logger=self.log)
+
+        # md5 完整性校验：有清单且失败=输入数据损坏，属"严重影响分析"——P0 整批
+        # 阻断（v2.9.0 DEC-21，原为剔除该样本继续）；清单识别与三态
+        # （OK/FAIL/SKIPPED 无清单跳过）见 DEC-36；启动通知已先行发出（DEC-38）
+        md5_failed, md5_state = set(), "SKIPPED"
+        if not self.args.dry_run:
+            md5_failed, _, md5_state = scanner.verify_md5(self.batch_dir, self.log,
+                                                          workers=self.plan.workers_io)
+            for sm in sorted(md5_failed & set(valid)):
+                self.log.error(f"md5 校验失败，样本 {sm} 输入数据损坏")
+
         # P0=阻断级（严重影响分析→直接中断批次，DEC-21）：依赖/样本名/磁盘/md5
         p0_reasons = []
         if missing_deps:

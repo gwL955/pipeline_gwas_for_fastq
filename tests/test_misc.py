@@ -698,6 +698,58 @@ class TestBatchExceptionPath(unittest.TestCase):
             self.assertIn("fastq.gz/.fq.gz", r.stdout)   # 指引正确扩展名
 
 
+class TestStartupNotifyOrder(unittest.TestCase):
+
+    def test_startup_notify_before_md5(self):
+        """★ 启动通知时序锚（DEC-38/RUN-53）：启动信息必须是第一条——先于
+        md5 校验发出（md5 哈希 GB 级输入可达数分钟，期间群里应已收到启动信息）；
+        曾置于 md5 之后，第一条消息被 md5 耗时阻塞且 md5 异常态提前外显冗余"""
+        import argparse
+        import types
+        from run_pipeline import BatchCtx
+        calls = []
+        with tempfile.TemporaryDirectory() as td:
+            bdir = os.path.join(td, "in", "B")
+            os.makedirs(bdir)
+            for r in ("R1", "R2"):
+                with open(os.path.join(bdir, f"SM1_{r}.fastq.gz"), "wb") as f:
+                    f.write(b"@x\nACGT\n+\nIIII\n")
+            res = os.path.join(td, "res")
+            os.makedirs(os.path.join(res, "logs"))     # Logger 落盘目标
+            plan = types.SimpleNamespace(
+                cpu_detected=8, mem_detected=32, profile="auto", reserve_cores=2,
+                reserve_mem_gb=2, workers=1, threads=4, workers_gatk=2, workers_io=2,
+                sort_mem="128M", gatk_mem="1g", cohort_mem="8g",
+                peak_per_sample_gb=20)
+            args = argparse.Namespace(dry_run=False, samples=None, step=6,
+                                      exclude_samples="", notify="on")
+            ctx = BatchCtx("B", bdir, res, args, plan, None)
+            ctx.bdata = {"samples": {}}               # 平时由 process_batch 挂载
+            ctx.notify_on = True
+
+            def fake_notify(title, body, logger=None):
+                calls.append(("notify", title))
+
+            def fake_md5(*a, **k):
+                calls.append(("md5", ""))
+                return set(), 0, "OK"
+
+            with mock.patch("dingtalk.notify", side_effect=fake_notify), \
+                    mock.patch("scanner.verify_md5", side_effect=fake_md5), \
+                    mock.patch("scanner.merge_all", return_value=({}, {})), \
+                    mock.patch("run_pipeline.nonempty", return_value=True):
+                try:
+                    ctx.step0_scan()
+                except RuntimeError:
+                    pass          # merge 空结果的收尾 raise，不影响顺序断言
+        self.assertTrue(calls)
+        self.assertEqual(calls[0][0], "notify")        # 第一件事：启动通知
+        self.assertIn("启动", calls[0][1])
+        md5_i = [i for i, c in enumerate(calls) if c[0] == "md5"]
+        self.assertTrue(md5_i, "md5 校验应被调用")
+        self.assertLess(0, md5_i[0])                   # notify 在 md5 之前
+
+
 class TestSighupHardening(unittest.TestCase):
     """★ SIGHUP 防护锚（DEC-33/RUN-48）：nohup 只让 Python 忽略 SIGHUP，
     SIG_IGN 经 fork/exec 继承本可覆盖 sh/singularity/bcftools 等全部子进程，

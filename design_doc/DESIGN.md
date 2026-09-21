@@ -3,7 +3,7 @@
 ```yaml
 # ---- design-meta（机器可解析锚点，勿手改格式；版本规则见 §0）----
 doc: GWAS-pipeline-design
-version: 2.26.0
+version: 2.27.0
 updated: 2026-09-19
 owner_human: gewenlong
 owner_machine: ZCode(GLM)
@@ -118,7 +118,7 @@ sorted.bed/interval_list 与 bed 同目录生成；sorted.bed 按 genome.dict �
 
 | Step | 操作（容器工具与关键语义） | 产物〔幂等键〕 | 分级检查 |
 | --- | --- | --- | --- |
-| **0 清点与合并** | 扫描三种布局（Illumina 平铺 `<样本>_S#_L###_R[12]_001.fastq.gz` / 外送子目录 `<样本>/<样本>_R[12].fastq.gz` / 外送平铺 `<样本>_R[12].fastq.gz`，DEC-23 识别器独立函数依序应用、先认者优先；**扩展名 fastq/fq.gz 双认 + 未识别文件进 `.unmatched` 点名（DEC-37）**）→ **剔除 IGNORED_SAMPLES 命中的非样本条目（Undetermined，DEC-31：INFO 日志 + samples.ignored，不算 invalid 不告警）** → `--samples` 白名单过滤 → **批次名/样本名白名单 `[A-Za-z0-9_.-]` 含中文即 P0（DEC-19）** → md5 清单识别（md5* 开头/txt 结尾/<TH-37，DEC-36）+ 并行校验〔三态 OK/FAIL/SKIPPED——无清单跳过、有清单失败 P0〕 → 磁盘/依赖预检 → 多 Lane `cat` 合并（并行）→ samples.tsv | `fastq_merged/<样本>_R{1,2}.fastq.gz`、`samples.tsv` | P0：批次名/样本名非法/依赖缺失/磁盘不足/md5 损坏（统一 raise 中断批次）；P1：合并失败（样本终止）；启动通知含全部预检结论 |
+| **0 清点与合并** | 扫描三种布局（Illumina 平铺 `<样本>_S#_L###_R[12]_001.fastq.gz` / 外送子目录 `<样本>/<样本>_R[12].fastq.gz` / 外送平铺 `<样本>_R[12].fastq.gz`，DEC-23 识别器独立函数依序应用、先认者优先；**扩展名 fastq/fq.gz 双认 + 未识别文件进 `.unmatched` 点名（DEC-37）**）→ **剔除 IGNORED_SAMPLES 命中的非样本条目（Undetermined，DEC-31：INFO 日志 + samples.ignored，不算 invalid 不告警）** → `--samples` 白名单过滤 → **批次名/样本名白名单 `[A-Za-z0-9_.-]` 含中文即 P0（DEC-19）** → md5 清单识别（md5* 开头/txt 结尾/<TH-37，DEC-36）+ 并行校验〔三态 OK/FAIL/SKIPPED——无清单跳过、有清单失败 P0〕 → 磁盘/依赖预检 → 多 Lane `cat` 合并（并行）→ samples.tsv | `fastq_merged/<样本>_R{1,2}.fastq.gz`、`samples.tsv` | P0：批次名/样本名非法/依赖缺失/磁盘不足/md5 损坏（统一 raise 中断批次）；P1：合并失败（样本终止）；启动通知含预检结论（先于 md5 发出，md5 经 Step0 里程碑三态，DEC-38） |
 | **1 QC+修剪** | fastqc(raw) → fastp（`-l 36`、adapter 自动检测，线程=fastp_threads）→ fastqc(trim) + **Adapter raw→trim 复检** | `fastq_clean/<样本>_R{1,2}.fastq.gz`〔fastp html/json〕、`qc/fastqc_raw|fastqc_trim|fastp`〔fastqc zip〕 | P1：reads<1M（TH-33，**对照样本降级 OK 提示行，DEC-31**）；P2：保留率<80/Q30<85（TH-03/04，TH-02~03 提示带、对照豁免 DEC-31）、NTC reads 占比>1%（TH-34） |
 | **2 比对** | `bwa-mem2 mem -K 100000000 -Y -R '@RG…SM:样本' | samtools sort -@T -m SORT_MEM`（管道流式）→ `samtools index` → flagstat/stats | `bam/<样本>/<样本>.sort.bam(+.bai)`〔sort.bam+.bai〕、`qc/flagstat|stats`〔对应文件〕 | P1：mapped<90 QC 口径（TH-05，报错不中断）；P2：mapped<95/pp<85（TH-06/07） |
 | **3 去重** | `gatk MarkDuplicates` → markdup.bam + metrics → flagstat/stats（去重前 duplicates 行不采集） | `bam/<样本>/<样本>.markdup.bam`〔markdup.bam+metrics〕 | P2：dup>30%（TH-09）；**里程碑"指标:"行=重复率均值 + ELS 统计（均值/方差/最低值+对应样本，DEC-32 排除对照）** |
@@ -174,6 +174,7 @@ Step 6 的矩阵裁决/每样本重建与 MultiQC 串行。HC `--native-pair-hmm
 | DEC-35 | **按步骤类型分化并行 workers（v2.24.0）**：`plan` 新增 `workers_gatk`（Step3/4/5-每样本HC/6：GATK 单线程类，每路峰值 ≈1.3×gatk 堆、CPU 每路预算 max(2, hmm 档) 核）与 `workers_io`（Step0 md5/合并 + Step1 fastp/fastqc：每路 ~2G、≤ GATK 类）；比对类 `workers` 与 bwa/-K/-Y、sort、fastp/fastqc/mosdepth 线程、GATK/cohort -Xmx、幂等 SKIP、cgroup/WSL2 探测、快速失败、`--workers` 最高优先级（三类同步覆盖）全部维持不变；HC `--native-pair-hmm-threads` 由固定 min(4, T/2) 改为 min(期望档, ⌊可用核/workers_gatk⌋)——保证 workers_gatk×hmm ≤ 可用核防超订阅，50 核机期望档仍为 4（单样本 HC 耗时不变，批耗时按波数线性折算）；table()/run_summary/启动与完成通知同步展示三类推导 | 50 线程/305.7G 机 48 样本批次实测：GATK 单线程工具以比对类 4 路并行时整机 CPU ~10%、内存 ~40G/290G——比对类 workers 被每路 17G bwa 索引峰值钉死（4=290//20.5），而 GATK 阶段索引非工作集；全程 6h53m 中 Step3 16min/Step4 79min/Step5 206min/Step6 34min 全部受 workers=4 限制；分化后 50 核机 GATK 类 12 路（min(48//4, 290//10.4)）、IO 类 12 路，预计全程 ~3.5h（HC 206→69min、BQSR 79→26min） |
 | DEC-36 | **md5 清单识别放宽 + 校验三态（v2.25.0）**：清单不再限死 `md5sum.txt`——识别口径=文件名 md5 开头、txt 结尾（均不区分大小写，覆盖 MD5.txt/MD5清单.TXT 等厂商变体）、体积 <TH-37（500KB，防同名大文本数据文件误认），多候选取字典序首个（WARN 点名忽略其余）；校验三态 OK / FAIL / SKIPPED——无清单跳过校验（此前通知恒显"md5 OK"，未校验也报 OK 有误导），有清单且失败维持 P0 整批中断（DEC-21）；Step0 里程碑通知 md5 字段按三态播报 | 厂商交付清单命名不一（md5.txt/MD5清单.txt 等），旧口径漏检即静默跳过且通知误报 OK；用户指定识别口径与三态语义（RUN-51） |
 | DEC-37 | **输入扩展名双认 + 未识别文件点名（v2.26.0）**：三个布局识别正则（ILLUMINA_RE/OUTSOURCED_RE/FLAT_OUTSOURCED_RE）统一改为 `\.(?:fastq|fq)\.gz`——曾只认 .fastq.gz，.fq.gz 整批被静默忽略 → 批次"无有效样本"跳过且 invalid 为空、原因不可见（nohup 下终端形同静默失败）；scan_batch 新增 `.unmatched` 未识别文件清单（平铺未被 Illumina/外送平铺式认领 + 子目录内未被外送式认领；md5 清单 DEC-36 口径排除），写入 run_summary samples.unmatched；批次跳过路径日志 WARN + 钉钉通知点名未识别文件（≤5 个示例）与正确扩展名；有效批次存在未识别文件时 INFO 计数 | 用户实跑报 .fq.gz 识别失败且终端静默（RUN-52）；RUN-36 同类病根的通用化收口 |
+| DEC-38 | **启动通知先于 md5 发出（v2.27.0）**：step0_scan 内通知顺序重排——开跑前检查（磁盘/依赖/批次名/样本名，毫秒级）→ **启动通知** → md5 校验（GB 级哈希可达数分钟）→ P0 判定；md5 异常不再进启动通知 pre_anoms（结果由 Step0 里程碑三态 OK/FAIL/SKIPPED（DEC-36）与 P0 失败通知（DEC-21 路径不变）兜底），启动播报不再被 md5 耗时阻塞 | 用户要求第一条信息必须是批次启动信息、应在程序开始 md5 之前发出（RUN-53）；md5 曾位于启动通知之前，大输入批次启动消息迟到数分钟 |
 
 ## 5. 统一口径与阈值总表（TH = config.py 镜像）<!-- HUMAN 可改值；MACHINE 同步 config 后过校验 -->
 
@@ -274,7 +275,7 @@ Step 6 的矩阵裁决/每样本重建与 MultiQC 串行。HC `--native-pair-hmm
 
 ### 5.4 通知时机与模板
 
-每批次：启动（样本数/输入体量/资源计划+预检结论）→ Step 0-6 每步里程碑（标题含
+每批次：启动（样本数/输入体量/资源计划+预检结论），**先于 md5 校验发出——第一条消息必须是批次启动信息，md5 哈希 GB 级输入可达数分钟；md5 结果经 Step0 里程碑三态与 P0 失败通知传达，DEC-38**）→ Step 0-6 每步里程碑（标题含
 "（共 X 步）"，X=--step：Step 0 为清点预备步不计入，全流程=6；DEC-32，RUN-47
 修正首版 +1 口径）→ 完成/失败；
 多批次另有总览。**交付文件推送（DEC-24，v2.15.0）：批次全部结束后逐成功批次
@@ -391,14 +392,14 @@ results/260422_20260914/                     Output/260422_20260914/
 | test_variant_post.py | 矩阵 `./.` 裁决、重建只换 GT、GT 列显式映射、norm outputs 口径 |
 | test_archive.py | 归档脚本：超期目录筛选（名后缀日期/边界>30 天/非法日期跳过）、7z 命令口径锚（8 参数含 -sdel）、幂等跳过、失败保留源、真实 7z 往返（skipUnless 本机有 7z） |
 | test_envfile.py | .env 解析语法、三源优先级、webhook 默认空、防回潮锚（源码无 access_token=）、降级、**靶区 bed 改址锚（GWAS_TARGETS_BED 只指 bed 本体、派生文件随同目录，RUN-38）** |
-| test_misc.py | tee 自动落盘、**实跑静默锚（控制台止于日志路径提示行，处理日志只进 run_<ts>.log）**、目录命名、跨午夜锚、全流程 dry-run success+零落盘锚、**样本名 P0 阻断锚（含中文点名，RUN-38）**、**批次名中文 P0 阻断锚（RUN-38）**、**.gitignore 拦截私密 bed 锚（RUN-38）**、**BedToIntervalList 参数锚（--UNIQUE/--DROP_MISSING_CONTIGS + awk 字典过滤 + 幂等跳过，RUN-40/42）**、**派生靶区新鲜度锚（源 mtime 更新→逐级重建，DEC-28）**、**HC -L interval_list 口径锚（DEC-28）**、**异常路径无 UnboundLocalError 锚（RUN-42：批次失败时 except 完整走完、不再二次崩）**、**SIGHUP 防护锚（DEC-33/RUN-48：ignore_sighup 置 SIG_IGN、GATK 10 类命令全带 -Xrs 且旧形态不残留、HC 命令形态、fastqc `_JAVA_OPTIONS=-Xrs` 前缀）**、**拆分名单锚（DEC-34：view -s 遍历 hc_ok）**、**cohort 复跑守卫锚（DEC-34+RUN-49：样本集变化→cohort/matrix/per_sample_vcf/stats/MultiQC 五处作废清空含 multiqc_data 子目录、同集/不可读零动作）**、--input 覆盖锚、--version、MultiQC 时序锚（step6 方法）、交付导出（Output 命名/md5sum/MANIFEST/MultiQC extra/幂等）、INDEX 累积锚、disk_guard、外送平铺布局端到端锚（RUN-36） |
+| test_misc.py | tee 自动落盘、**实跑静默锚（控制台止于日志路径提示行，处理日志只进 run_<ts>.log）**、目录命名、跨午夜锚、全流程 dry-run success+零落盘锚、**样本名 P0 阻断锚（含中文点名，RUN-38）**、**批次名中文 P0 阻断锚（RUN-38）**、**.gitignore 拦截私密 bed 锚（RUN-38）**、**BedToIntervalList 参数锚（--UNIQUE/--DROP_MISSING_CONTIGS + awk 字典过滤 + 幂等跳过，RUN-40/42）**、**派生靶区新鲜度锚（源 mtime 更新→逐级重建，DEC-28）**、**HC -L interval_list 口径锚（DEC-28）**、**异常路径无 UnboundLocalError 锚（RUN-42：批次失败时 except 完整走完、不再二次崩）**、**跳出不静默锚（RUN-52/DEC-37：全部文件未识别 → 退出码 0 但点名未识别文件与正确扩展名）**、**启动通知先于 md5 时序锚（RUN-53/DEC-38：mock 记录调用顺序，启动通知必须是第一个调用）**、**SIGHUP 防护锚（DEC-33/RUN-48：ignore_sighup 置 SIG_IGN、GATK 10 类命令全带 -Xrs 且旧形态不残留、HC 命令形态、fastqc `_JAVA_OPTIONS=-Xrs` 前缀）**、**拆分名单锚（DEC-34：view -s 遍历 hc_ok）**、**cohort 复跑守卫锚（DEC-34+RUN-49：样本集变化→cohort/matrix/per_sample_vcf/stats/MultiQC 五处作废清空含 multiqc_data 子目录、同集/不可读零动作）**、--input 覆盖锚、--version、MultiQC 时序锚（step6 方法）、交付导出（Output 命名/md5sum/MANIFEST/MultiQC extra/幂等）、INDEX 累积锚、disk_guard、外送平铺布局端到端锚（RUN-36） |
 
 `./run_tests.sh` = unittest 全量 + `check_design.py`（TH↔config + 版本双源）；
 CI（.github/workflows/ci.yml）在 py3.10/3.12 矩阵执行。
 
 ### 9.2 迁移/重建验证顺序（DEC-12）
 
-1. `./run_tests.sh` 全绿（全部用例数见 §9.1 各文件，当前共 169）
+1. `./run_tests.sh` 全绿（全部用例数见 §9.1 各文件，当前共 170）
 2. `cp .env.example .env` 填 webhook → `python3 run_pipeline.py --notify-test`（连通性）
 3. `python3 run_pipeline.py --dry-run --batch <小批次>`（容器/参考文件/路径与资源计划）
 4. `python3 run_pipeline.py --resource-profile low --dry-run`（低配档口径）
@@ -406,7 +407,7 @@ CI（.github/workflows/ci.yml）在 py3.10/3.12 矩阵执行。
 
 ### 9.3 重建完成判据
 
-169 用例 + check_design 全绿；`--version` 输出与本文档 version 一致；dry-run 零落盘；
+170 用例 + check_design 全绿；`--version` 输出与本文档 version 一致；dry-run 零落盘；
 单批次实跑 success 且 Step 6 交付目录含 VCF+tbi+MultiQC，`md5sum -c` 全过。
 
 ## 10. 变更日志（CHANGELOG）<!-- 人机共写：每方改动各记一行 -->
@@ -475,6 +476,8 @@ CI（.github/workflows/ci.yml）在 py3.10/3.12 矩阵执行。
 | 2.25.0 | 2026-09-21 | 机 | DEC-36：scanner.find_md5_manifest（大小写不敏感/TH-37 体积上限/多候选字典序首个+WARN）+ verify_md5 三态返回；run_pipeline step0 接线与里程碑 md5 字段三态播报；config.MD5_MANIFEST_MAX_BYTES+TH-37；测试 163→166（识别口径与体积上限锚/三态锚/多候选锚，旧 2 处解包同步三态）；RUN-51 |
 | 2.26.0 | 2026-09-21 | 人 | 修正文件名识别：.fq.gz 扩展名识别失败致整批静默跳过——三布局正则双认 fastq/fq.gz；未识别文件须点名可见，不得静默 |
 | 2.26.0 | 2026-09-21 | 机 | DEC-37：三识别正则 `\.(?:fastq|fq)\.gz`（互斥性保持）；ScanResult 增 .unmatched（md5 清单排除）+ run_summary samples.unmatched；跳过路径 WARN/钉钉点名未识别文件（≤5 示例+正确扩展名指引）、有效批次 INFO 计数；测试 166→169（fq.gz 三布局+混批 Lane 锚/unmatched 排除 md5 锚/E2E 跳出不静默锚）；RUN-52 |
+| 2.27.0 | 2026-09-21 | 人 | 修正通知时序：启动通知应在程序开始、md5 校验之前发出（第一条信息=批次启动信息）；md5 在 step0 |
+| 2.27.0 | 2026-09-21 | 机 | DEC-38：step0_scan 通知块移至 md5 块之前，md5 异常摘出启动 pre_anoms（Step0 里程碑三态+P0 失败通知兜底，P0 阻断路径不变）；测试 169→170（TestStartupNotifyOrder 时序锚）；RUN-53 |
 
 ## 11. 证据索引 <!-- MACHINE -->
 
@@ -483,7 +486,7 @@ CI（.github/workflows/ci.yml）在 py3.10/3.12 矩阵执行。
 | 运行台账（每轮） | pipeline/design_doc/RUN_HISTORY.md |
 | 验收运行（0_raw_data_test） | results/260422_20260914/、results/260422_20260916/ 等（运行日志在各批次 logs/） |
 | 交付 | Output/<批次>_<日期>/ + INDEX.md（累积） |
-| 测试集与 CI | pipeline/tests/（169 用例）+ run_tests.sh + .github/workflows/ci.yml |
+| 测试集与 CI | pipeline/tests/（170 用例）+ run_tests.sh + .github/workflows/ci.yml |
 | 使用说明/与笔记差异 | pipeline/README.md |
 | 环境参数 | pipeline/.env（密钥，600）+ pipeline/.env.example（模板） |
 | 命令参考快照 | pipeline/design_doc/notes_code_reference.md |

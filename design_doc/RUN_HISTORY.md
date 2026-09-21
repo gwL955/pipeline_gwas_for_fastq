@@ -69,6 +69,8 @@
 
 | RUN-52 | 09-21 1x:xx | 用户报：输入文件扩展名 .fq.gz 时识别失败，且终端静默失败 → 复现确认：三个识别正则只认 .fastq.gz，.fq.gz 文件不构成样本、不进 invalid（扫描器静默忽略），整批走"无有效样本"跳过路径——退出码 0 + nohup 控制台止于日志路径行（RUN-37 设计）+ 跳过通知 invalid 清单为空，三重叠加形同静默失败。用户指示：修正识别 + 不再静默 | ✅ | DEC-37：①ILLUMINA_RE/OUTSOURCED_RE/FLAT_OUTSOURCED_RE 统一 `\.(?:fastq|fq)\.gz`（互斥性不受影响——结尾判据同步双认）；②scan_batch 增 .unmatched 未识别文件清单（平铺未被 Illumina/外送平铺认领 + 子目录内未被外送式认领；md5 清单按 DEC-36 口径排除），ScanResult 四参（二元组解包兼容保持）；③run_pipeline：有效批次存在未识别文件时 INFO 计数，跳过路径 WARN + 钉钉通知点名未识别文件（≤5 示例）与正确扩展名指引，run_summary 增 samples.unmatched 追溯。测试 166→169（fq.gz 三布局+混批双扩展名 Lane 锚 / unmatched 排除 md5 清单锚 / E2E 跳出不静默锚：退出码 0 但 stdout 点名 SM1_R1.fqq.gz 与 fastq.gz/.fq.gz 指引）；run_pipeline step0_scan/DESIGN/双 README/tests README 同步 | scanner.py、run_pipeline.py；design_doc/DESIGN.md DEC-37/CHANGELOG 2.26.0；tests/test_scanner.py、test_misc.py |
 
+| RUN-53 | 09-21 1x:xx | 用户指示：启动通知在 md5 校验完成后才发送，但第一条信息应当是批次启动信息——应在程序开始、md5 校验之前发出 | ✅ | DEC-38：step0_scan 通知顺序重排——开跑前检查（磁盘/依赖/批次名/样本名，毫秒级）→ 启动通知 → md5（GB 级哈希可达数分钟）→ P0 判定；md5 异常摘出启动 pre_anoms（曾随启动通知可见，现由 Step0 里程碑三态（DEC-36）与 P0 失败通知（DEC-21，阻断路径不变）兜底）；启动消息体不变（仍含预检结论，仅不含 md5 项）。测试 169→170（TestStartupNotifyOrder：BatchCtx 直构 + mock dingtalk.notify/scanner.verify_md5 记录调用顺序，断言第一个调用是『批次 · 启动』且先于 md5） | run_pipeline.py；design_doc/DESIGN.md DEC-38/CHANGELOG 2.27.0；tests/test_misc.py |
+
 ## 三、指标速查（最终有效轮：RUN-08/15 数据）<!-- MACHINE -->
 
 | 批次 | 样本 | fastp保留率 | mapped | dup | 20X | raw SNP/INDEL | PASS SNP/INDEL | Ti/Tv |
