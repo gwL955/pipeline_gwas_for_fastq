@@ -159,6 +159,30 @@ class TestNewChecks(unittest.TestCase):
         self.assertEqual(alerts.check_recal_low({"B": 45782114.0}), [])
 
 
+class TestDupCvP1(unittest.TestCase):
+    """★ Step3 批内变异 CV（DEC-40/RUN-56）：批内重复率 CV >TH-38（20%）→ P1——
+    重复率是建库/上样的指纹，批内离散比 Step6 深度 CV 早三步暴露批次异质"""
+
+    def test_dup_cv_p1_threshold(self):
+        a = alerts.check_dup_cv({"A": 5.0, "B": 5.2, "C": 30.0})     # CV≈0.88
+        self.assertEqual(len(a), 1)
+        self.assertEqual(a[0][0], "P1")
+        self.assertIn("CV=", a[0][1])
+        self.assertIn("20%", a[0][1])                              # 阈值点名
+        self.assertIn("5.0-30.0%", a[0][1])                        # 极值区间
+        self.assertEqual(alerts.check_dup_cv({"A": 5.0, "B": 5.2, "C": 4.9}), [])  # 均匀
+        self.assertEqual(alerts.check_dup_cv({"A": 5.0}), [])      # 单样本不判
+
+    def test_dup_cv_scope_and_display(self):
+        # 对照排除（NTC 重复率无统计意义，不参与）
+        self.assertEqual(alerts.check_dup_cv({"A": 5.0, "B": 5.1, "NTC": 90.0},
+                                             excluded={"NTC"}), [])
+        # cv_of 展示口径：比率 float / 样本不足 None
+        self.assertAlmostEqual(alerts.cv_of({"A": 5.0, "B": 7.5}), 0.2, places=6)
+        self.assertIsNone(alerts.cv_of({"A": 5.0}))
+        self.assertIsNone(alerts.cv_of(None))
+
+
 class TestControlExemption(unittest.TestCase):
     """★ RUN-45/DEC-31：对照样本（excluded）豁免样本级阈值——reads 低降级 OK
     级提示行播报实际数值；其余指标直接跳过；污染仍由 check_ntc/check_ntc_reads

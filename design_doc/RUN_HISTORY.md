@@ -75,6 +75,8 @@
 
 | RUN-55 | 09-21 1x:xx | 外部服务器运行报 NTC 识别问题：排除机制为精确名匹配，本批对照是长前缀名（202609182149_AE01-231101003_4P260813139US293229A2_B_ZM20260918D_NTC_combined，外送平铺布局样本名=文件名去 _R[12].fq.gz 尾），run_pipeline 用 --exclude-samples(默认 "NTC") 整串比对 → excluded={"NTC"} 与样本集交集为空 | ✅ | DEC-39：新 _match_excluded——整串相等或 [_\-.] 分隔 token 相等（均不区分大小写），部分子串不误中（MNTCX 不中 NTC）；self.excluded 由"排除项字面"改存【命中的样本名】——全部消费者（step5 calling 名单/_avg 指标豁免/check_ntc TH-21·check_ntc_reads TH-34 污染监控/qc_hsmetrics control 口径）集合语义不变、直接生效（此前排除落空时污染监控同步失效）；命中样本逐个 INFO、未命中项 INFO 说明（无对照批次不刷屏）；CLI help/双 README/DESIGN CLI 表同步。测试 171→173（token 单元锚 + 长前缀 NTC dry-run E2E 锚：对照名不进任何 HaplotypeCaller 命令、播报"对照样本（排除出联合分型）"命中行） | run_pipeline.py；design_doc/DESIGN.md DEC-39/CHANGELOG 2.29.0；tests/test_misc.py |
 
+| RUN-56 | 09-21 1x:xx | 用户指示：Step 3 钉钉通知加入批内变异 CV 指标，告警（P1）阈值 20% | ✅ | DEC-40/TH-38：config.DUP_CV_P1=0.2（比率口径同 DEPTH_CV_P2，check_design 镜像集登记）；alerts 新增 cv_of（总体方差口径，排除对照，<2/无值 None）与 check_dup_cv（>TH-38 → P1，消息点名 CV 值/阈值/重复率极值区间——疑似批次异质〔文库质量/上样量差异〕，比 Step6 深度 CV〔TH-35 P2〕早三步）；step3 里程碑 metrics 行增「批内变异 CV x.x%（阈值 20%）」（n/a 兜底）、anomalies 接入；DESIGN §3.1/§5.2/TH-38、双 README §6.3 表、tests README 同步。测试 173→175（TestDupCvP1：阈值命中/极值区间/均匀不报/单样本不判/对照排除/cv_of 比率与 None 口径） | alerts.py、run_pipeline.py、config.py、check_design.py；design_doc/DESIGN.md DEC-40/TH-38/CHANGELOG 2.30.0；tests/test_alerts.py |
+
 ## 三、指标速查（最终有效轮：RUN-08/15 数据）<!-- MACHINE -->
 
 | 批次 | 样本 | fastp保留率 | mapped | dup | 20X | raw SNP/INDEL | PASS SNP/INDEL | Ti/Tv |

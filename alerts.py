@@ -197,6 +197,33 @@ def check_ntc_reads(ntc_reads, median_reads):
     return []
 
 
+def cv_of(d, excluded=()):
+    """样本间变异系数 CV（总体方差口径，与 check_depth_cv 一致）→ float|None
+    （有效样本 <2 或无值 → None；对照排除，DEC-31）"""
+    vals = [v for sm, v in (d or {}).items()
+            if isinstance(v, (int, float)) and sm not in excluded]
+    if len(vals) < 2:
+        return None
+    mean = sum(vals) / len(vals)
+    if mean <= 0:
+        return None
+    return (sum((v - mean) ** 2 for v in vals) / len(vals)) ** 0.5 / mean
+
+
+def check_dup_cv(dup_pct, excluded=()):
+    """批内重复率变异系数 CV 过大 → P1（TH-38=20%，DEC-40）：重复率是建库/上样
+    环节的指纹，批内离散常指向文库质量或上样量差异——比 Step6 深度 CV（TH-35）
+    早三步暴露批次异质；对照样本排除（NTC 重复率无统计意义）"""
+    cv = cv_of(dup_pct, excluded)
+    if cv is None or cv <= config.DUP_CV_P1:
+        return []
+    vals = [v for sm, v in (dup_pct or {}).items()
+            if isinstance(v, (int, float)) and sm not in excluded]
+    return [("P1", f"批内重复率离散度 CV={cv * 100:.1f}%（阈值 "
+                   f"{config.DUP_CV_P1 * 100:.0f}%，重复率 {min(vals):.1f}-{max(vals):.1f}%）"
+                   f"——疑似批次异质（文库质量/上样量差异）")]
+
+
 def check_depth_cv(mean_depth, excluded=()):
     """批次内样本间 mean depth 变异系数 CV 过大 → P2（疑似混入异常样本）；
     对照样本深度近 0 会拉爆 CV，不参与统计（DEC-31）"""

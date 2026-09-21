@@ -9,7 +9,7 @@ from pathlib import Path
 
 # ── 流程版本（与 design_doc/DESIGN.md design-meta version 同步，
 #    check_design.py 校验两处一致；写进 run_summary 与交付 README） ──────
-PIPELINE_VERSION = "2.29.0"
+PIPELINE_VERSION = "2.30.0"
 
 # ── 工作区 ──────────────────────────────────────────────────────────────
 PIPELINE_DIR = Path(__file__).resolve().parent          # $WORK/pipeline
@@ -153,6 +153,8 @@ NTC_READS_PCT_P2 = float(os.environ.get("GWAS_NTC_READS_PCT_P2", "1.0"))
                                 # Step1: NTC reads 占批次中位样本 % >1% → P2（污染维度之二）
 DEPTH_CV_P2 = float(os.environ.get("GWAS_DEPTH_CV_P2", "0.5"))
                                 # Step6: 批次内 mean depth 变异系数 CV >0.5 → P2（混入异常样本）
+DUP_CV_P1 = float(os.environ.get("GWAS_DUP_CV_P1", "0.2"))
+                                # Step3: 批内重复率变异系数 CV >20% → P1（批次异质早预警，DEC-40）
 RECAL_OBS_MIN_P2 = float(os.environ.get("GWAS_RECAL_OBS_MIN_P2", "100000"))
                                 # Step4: recal M 事件观测数 <1e5 → P2（known-sites 覆盖崩坏，校准不可信）
 MD5_MANIFEST_MAX_BYTES = int(os.environ.get("GWAS_MD5_MANIFEST_MAX_BYTES", str(500 * 1024)))

@@ -3,7 +3,7 @@
 ```yaml
 # ---- design-meta（机器可解析锚点，勿手改格式；版本规则见 §0）----
 doc: GWAS-pipeline-design
-version: 2.29.0
+version: 2.30.0
 updated: 2026-09-19
 owner_human: gewenlong
 owner_machine: ZCode(GLM)
@@ -121,7 +121,7 @@ sorted.bed/interval_list 与 bed 同目录生成；sorted.bed 按 genome.dict �
 | **0 清点与合并** | 扫描三种布局（Illumina 平铺 `<样本>_S#_L###_R[12]_001.fastq.gz` / 外送子目录 `<样本>/<样本>_R[12].fastq.gz` / 外送平铺 `<样本>_R[12].fastq.gz`，DEC-23 识别器独立函数依序应用、先认者优先；**扩展名 fastq/fq.gz 双认 + 未识别文件进 `.unmatched` 点名（DEC-37）**）→ **剔除 IGNORED_SAMPLES 命中的非样本条目（Undetermined，DEC-31：INFO 日志 + samples.ignored，不算 invalid 不告警）** → `--samples` 白名单过滤 → **批次名/样本名白名单 `[A-Za-z0-9_.-]` 含中文即 P0（DEC-19）** → md5 清单识别（md5* 开头/txt 结尾/<TH-37，DEC-36）+ 并行校验〔三态 OK/FAIL/SKIPPED——无清单跳过、有清单失败 P0〕 → 磁盘/依赖预检 → 多 Lane `cat` 合并（并行）→ samples.tsv | `fastq_merged/<样本>_R{1,2}.fastq.gz`、`samples.tsv` | P0：批次名/样本名非法/依赖缺失/磁盘不足/md5 损坏（统一 raise 中断批次）；P1：合并失败（样本终止）；启动通知含预检结论（先于 md5 发出，md5 经 Step0 里程碑三态，DEC-38） |
 | **1 QC+修剪** | fastqc(raw) → fastp（`-l 36`、adapter 自动检测，线程=fastp_threads）→ fastqc(trim) + **Adapter raw→trim 复检** | `fastq_clean/<样本>_R{1,2}.fastq.gz`〔fastp html/json〕、`qc/fastqc_raw|fastqc_trim|fastp`〔fastqc zip〕 | P1：reads<1M（TH-33，**对照样本降级 OK 提示行，DEC-31**）；P2：保留率<80/Q30<85（TH-03/04，TH-02~03 提示带、对照豁免 DEC-31）、NTC reads 占比>1%（TH-34） |
 | **2 比对** | `bwa-mem2 mem -K 100000000 -Y -R '@RG…SM:样本' | samtools sort -@T -m SORT_MEM`（管道流式）→ `samtools index` → flagstat/stats | `bam/<样本>/<样本>.sort.bam(+.bai)`〔sort.bam+.bai〕、`qc/flagstat|stats`〔对应文件〕 | P1：mapped<90 QC 口径（TH-05，报错不中断）；P2：mapped<95/pp<85（TH-06/07） |
-| **3 去重** | `gatk MarkDuplicates` → markdup.bam + metrics → flagstat/stats（去重前 duplicates 行不采集） | `bam/<样本>/<样本>.markdup.bam`〔markdup.bam+metrics〕 | P2：dup>30%（TH-09）；**里程碑"指标:"行=重复率均值 + ELS 统计（均值/方差/最低值+对应样本，DEC-32 排除对照）** |
+| **3 去重** | `gatk MarkDuplicates` → markdup.bam + metrics → flagstat/stats（去重前 duplicates 行不采集） | `bam/<样本>/<样本>.markdup.bam`〔markdup.bam+metrics〕 | P1：批内重复率 CV>TH-38 20%（DEC-40）；P2：dup>30%（TH-09）；**里程碑"指标:"行=重复率均值 + ELS 统计（均值/方差/最低值+对应样本，DEC-32 排除对照）** |
 | **4 BQSR** | `gatk BaseRecalibrator`（dbsnp+Mills）→ recal.table → `ApplyBQSR` → **BQSR 前后 flagstat 逐行一致断言**（不一致该样本失败隔离） | `bam/<样本>/<样本>.recal.table`、`<样本>.markdup.BQSR.bam`〔BQSR bam+table〕 | P2：recal M 事件观测数<1e5（TH-36，校准不可信） |
 | **5 变异检测** | BedToIntervalList 准备（`--UNIQUE true` 重叠/相邻区间去重合并 + `--DROP_MISSING_CONTIGS true` 丢字典外 contig，DEC-26；sorted.bed 生成按 genome.dict 过滤 contig、派生文件随源 mtime 失效重建，DEC-28） → 每样本 `gatk HaplotypeCaller -ERC GVCF`（**-L interval_list** 字典口径，DEC-28；靶区±100bp，样本级并行）→ gvcf.list（sorted，DEC-05）→ **cohort 复跑守卫（DEC-34）**：现存关键 VCF header 样本清单（`bcftools query -l`）≠ 本次 hc_ok → 作废 cohort/matrix/per_sample_vcf 全部派生产物重算（防 HC 失败样本补回后被幂等 SKIP 沿用旧口径；**连同 cohort 级 bcftools_stats 与 MultiQC 报告一并作废——二者自带幂等 SKIP 会沿用陈旧文件，RUN-49 补漏**） → 批次内 `CombineGVCFs→GenotypeGVCFs`（串行）→ `bcftools norm -m -any` → SelectVariants SNP/INDEL → VariantFiltration 硬过滤（SNP：QD2/QUAL30/SOR3/FS60/MQ40/MQRankSum/ReadPosRankSum；INDEL：QD2/QUAL30/SOR10/FS200/ReadPosRankSum）→ concat → **FILTER 列出现 `.` 判错** → PASS 提取 → 双口径矩阵导出（`query -R`）+ 每样本 hardfiltered/PASS 拆分（`view -s`，**名单=实际进 cohort 的 hc_ok**，DEC-34） | `gvcf/<样本>.g.vcf.gz`、`cohort/cohort.{raw→split→snp/indel→hardfiltered→PASS}.vcf.gz`、`matrix/genotype_matrix.tsv`、`matrix/genotype_detail_PASS.tsv`、`per_sample_vcf/<样本>.{hardfiltered,PASS}.vcf.gz` | cohort 级失败 raise 中断批次；P2：对账·数量（矩阵行数 vs `view -R` 计数，DEC-11 同口径）、对账·新鲜度（关键 VCF mtime<启动） |
 | **6 汇总与交付** | mosdepth×2（markdup/BQSR bam）→ `CollectHsMetrics`（BQSR bam）→ **矩阵 `./.` 裁决**（mosdepth bqsr regions 深度 DP≥TH-15 改判 0/0）→ 每样本 PASS VCF 重建（`view -s` + GT 替换，其余字段原样）→ **MultiQC 最终报告（此时全部流程结束、QC 齐全）** → 交付导出 Output/ | `qc/mosdepth|hs metrics|multiqc`、`matrix/genotype_matrix.adjudicated.tsv`、`per_sample_vcf/<样本>.PASS.adjudicated.vcf.gz(+.tbi)`、`Output/<批次>_<日期>/` 全套 | P1：PASS 裁决 VCF 0 记录（交付为空）、NTC 靶深>10×（TH-21）；P2：捕获效率 PCT_SELECTED<85/depth<50/20X<95/Ti-Tv<2.0/call rate<95（TH-14/11/13/22/23）、批次深度 CV>0.5（TH-35） |
@@ -176,6 +176,7 @@ Step 6 的矩阵裁决/每样本重建与 MultiQC 串行。HC `--native-pair-hmm
 | DEC-37 | **输入扩展名双认 + 未识别文件点名（v2.26.0）**：三个布局识别正则（ILLUMINA_RE/OUTSOURCED_RE/FLAT_OUTSOURCED_RE）统一改为 `\.(?:fastq|fq)\.gz`——曾只认 .fastq.gz，.fq.gz 整批被静默忽略 → 批次"无有效样本"跳过且 invalid 为空、原因不可见（nohup 下终端形同静默失败）；scan_batch 新增 `.unmatched` 未识别文件清单（平铺未被 Illumina/外送平铺式认领 + 子目录内未被外送式认领；md5 清单 DEC-36 口径排除），写入 run_summary samples.unmatched；批次跳过路径日志 WARN + 钉钉通知点名未识别文件（≤5 个示例）与正确扩展名；有效批次存在未识别文件时 INFO 计数 | 用户实跑报 .fq.gz 识别失败且终端静默（RUN-52）；RUN-36 同类病根的通用化收口 |
 | DEC-38 | **启动通知先于 md5 发出（v2.27.0）**：step0_scan 内通知顺序重排——开跑前检查（磁盘/依赖/批次名/样本名，毫秒级）→ **启动通知** → md5 校验（GB 级哈希可达数分钟）→ P0 判定；md5 异常不再进启动通知 pre_anoms（结果由 Step0 里程碑三态 OK/FAIL/SKIPPED（DEC-36）与 P0 失败通知（DEC-21 路径不变）兜底），启动播报不再被 md5 耗时阻塞 | 用户要求第一条信息必须是批次启动信息、应在程序开始 md5 之前发出（RUN-53）；md5 曾位于启动通知之前，大输入批次启动消息迟到数分钟 |
 | DEC-39 | **对照排除改 token 级匹配（v2.29.0）**：`--exclude-samples`（默认 NTC）命中口径从整串相等放宽为**整串相等或 [_\-.] 分隔 token 相等（均不区分大小写）**；`self.excluded` 存命中的样本名（原为排除项字面），全部消费者（calling 名单/指标豁免/HsMetrics 对照口径/TH-21·34 污染监控的 NTC 识别）随之生效；命中样本逐个 INFO 播报，未命中项 INFO 说明（无对照批次不刷屏）；部分子串不误中（MNTCX 不中 NTC） | 外部服务器实跑：外送平铺对照名带长前缀（如 `..._ZM20260918D_NTC_combined`），整串比对 `"NTC"` 漏排——排除集为空 → NTC 进联合分型、污染监控同时失效（RUN-55） |
+| DEC-40 | **Step3 通知加入批内变异 CV（v2.30.0）**：去重里程碑 metrics 行增「批内变异 CV x.x%（阈值 20%）」（alerts.cv_of，总体方差口径同 TH-35 深度 CV，排除对照、样本 <2 显 n/a 不判）；超 TH-38（DUP_CV_P1=0.2，P1 级）→ 异常行点名极值区间——重复率是建库/上样环节的指纹，批内离散比 Step6 深度 CV（TH-35 P2）早三步暴露批次异质 | 用户要求（RUN-56）：Step3 钉钉通知加入批内变异 CV 指标，P1 阈值 20% |
 
 ## 5. 统一口径与阈值总表（TH = config.py 镜像）<!-- HUMAN 可改值；MACHINE 同步 config 后过校验 -->
 
@@ -220,6 +221,7 @@ Step 6 的矩阵裁决/每样本重建与 MultiQC 串行。HC `--native-pair-hmm
 | TH-35 | DEPTH_CV_P2 | 0.5 | 批次内 mean depth 变异系数 CV>0.5 → P2 |
 | TH-36 | RECAL_OBS_MIN_P2 | 100000 | BQSR recal M 事件观测数 <1e5 → P2（校准不可信） |
 | TH-37 | MD5_MANIFEST_MAX_BYTES | 512000 | md5 清单识别体积上限：≥此值不认清单（DEC-36，防同名大文本文件误认） |
+| TH-38 | DUP_CV_P1 | 0.2 | Step3 批内重复率变异系数 CV >20% → P1（批次异质早预警，DEC-40） |
 
 ### 5.2 分级告警体系（DEC-21/22，三级）
 
@@ -245,6 +247,7 @@ Step 6 的矩阵裁决/每样本重建与 MultiQC 串行。HC `--native-pair-hmm
 | Step 1 · NTC reads | NTC reads 占批次中位样本 > TH-34 | P2 |
 | Step 2 · 比对 | mapped <TH-06 或 properly paired <TH-07 | P2 |
 | Step 3 · 去重 | 重复率 > TH-09（建库复杂度告急） | P2 |
+| Step 3 · 批内变异 CV | 批内重复率 CV > TH-38（阈值 20%，排除对照；样本 <2 不判）——疑似批次异质（文库质量/上样量差异） | P1 |
 | Step 4 · 校准可信 | BQSR recal M 事件观测数 < TH-36 | P2 |
 | Step 5 · 对账·数量 | 矩阵行数 ≠ 靶区记录数（view -R 同口径，DEC-11） | P2 |
 | Step 5 · 对账·新鲜度 | 关键 VCF mtime < 本次启动（断点续跑复用旧产物） | P2 |
@@ -401,7 +404,7 @@ CI（.github/workflows/ci.yml）在 py3.10/3.12 矩阵执行。
 
 ### 9.2 迁移/重建验证顺序（DEC-12）
 
-1. `./run_tests.sh` 全绿（全部用例数见 §9.1 各文件，当前共 173）
+1. `./run_tests.sh` 全绿（全部用例数见 §9.1 各文件，当前共 175）
 2. `cp .env.example .env` 填 webhook → `python3 run_pipeline.py --notify-test`（连通性）
 3. `python3 run_pipeline.py --dry-run --batch <小批次>`（容器/参考文件/路径与资源计划）
 4. `python3 run_pipeline.py --resource-profile low --dry-run`（低配档口径）
@@ -409,7 +412,7 @@ CI（.github/workflows/ci.yml）在 py3.10/3.12 矩阵执行。
 
 ### 9.3 重建完成判据
 
-173 用例 + check_design 全绿；`--version` 输出与本文档 version 一致；dry-run 零落盘；
+175 用例 + check_design 全绿；`--version` 输出与本文档 version 一致；dry-run 零落盘；
 单批次实跑 success 且 Step 6 交付目录含 VCF+tbi+MultiQC，`md5sum -c` 全过。
 
 ## 10. 变更日志（CHANGELOG）<!-- 人机共写：每方改动各记一行 -->
@@ -484,6 +487,8 @@ CI（.github/workflows/ci.yml）在 py3.10/3.12 矩阵执行。
 | 2.28.0 | 2026-09-21 | 机 | _fmt_gb→_fmt_gib：÷1024³ 并以 GiB（IEC）标注（曾十进制 1e9 GB，与 ls -lh/du 二进制口径不一致）；日志/启动通知/Step0 里程碑三处同步；测试 170→171（二进制口径锚）；RUN-54 |
 | 2.29.0 | 2026-09-21 | 人 | 修 NTC 识别：排除机制是精确名匹配，长前缀对照名（..._NTC_combined）未被默认 "NTC" 命中，排除集对样本集交集为空 |
 | 2.29.0 | 2026-09-21 | 机 | DEC-39：新 _match_excluded（整串或 [_\-.] token，不区分大小写）；self.excluded 改存命中样本名（消费者集合语义不变全线生效）；命中/未命中 INFO 播报；CLI help 更新；测试 171→173（token 单元锚：长前缀/大小写/部分子串不误中 + 长前缀 NTC E2E 锚：dry-run HC 命令不含对照名且播报命中行）；RUN-55 |
+| 2.30.0 | 2026-09-21 | 人 | Step 3 钉钉通知加入批内变异 CV 指标，告警（P1）阈值 20% |
+| 2.30.0 | 2026-09-21 | 机 | DEC-40/TH-38：config.DUP_CV_P1=0.2（镜像集登记）+ alerts.cv_of/check_dup_cv（总体方差口径、排除对照、<2 不判）；step3 通知 metrics 增「批内变异 CV x.x%（阈值 20%）」、anomalies 接 check_dup_cv（点名极值区间）；测试 173→175；RUN-56 |
 
 ## 11. 证据索引 <!-- MACHINE -->
 
@@ -492,7 +497,7 @@ CI（.github/workflows/ci.yml）在 py3.10/3.12 矩阵执行。
 | 运行台账（每轮） | pipeline/design_doc/RUN_HISTORY.md |
 | 验收运行（0_raw_data_test） | results/260422_20260914/、results/260422_20260916/ 等（运行日志在各批次 logs/） |
 | 交付 | Output/<批次>_<日期>/ + INDEX.md（累积） |
-| 测试集与 CI | pipeline/tests/（173 用例）+ run_tests.sh + .github/workflows/ci.yml |
+| 测试集与 CI | pipeline/tests/（175 用例）+ run_tests.sh + .github/workflows/ci.yml |
 | 使用说明/与笔记差异 | pipeline/README.md |
 | 环境参数 | pipeline/.env（密钥，600）+ pipeline/.env.example（模板） |
 | 命令参考快照 | pipeline/design_doc/notes_code_reference.md |
