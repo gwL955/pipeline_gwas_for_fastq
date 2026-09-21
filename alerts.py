@@ -232,6 +232,27 @@ def cv_of(d, excluded=()):
     return (sum((v - mean) ** 2 for v in vals) / len(vals)) ** 0.5 / mean
 
 
+def check_els_min_z(els, excluded=()):
+    """ELS 最低样本 Z ≤ TH-39（-3 SD）→ P1：偏离批均值 3 个标准差以上，文库
+    复杂度离群（该样本建库/上样环节异常）。总体 SD 口径下单点 Z 极值=-√(n-1)，
+    批内 <10 样本数学上不可达（不属漏报）；SD=0 无法定标不判；对照排除"""
+    vals = [(sm, v) for sm, v in (els or {}).items()
+            if isinstance(v, (int, float)) and sm not in excluded]
+    if len(vals) < 2:
+        return []
+    mean = sum(v for _, v in vals) / len(vals)
+    sd = (sum((v - mean) ** 2 for _, v in vals) / len(vals)) ** 0.5
+    if sd <= 0:
+        return []
+    lo_sm, lo_v = min(vals, key=lambda x: x[1])
+    z = (lo_v - mean) / sd
+    if z <= config.ELS_MIN_Z_P1:
+        return [("P1", f"ELS 最低样本 {lo_sm} Z={z:.1f}（阈值 "
+                       f"{config.ELS_MIN_Z_P1:.0f} SD，ELS {lo_v:.2e} vs 批均值 "
+                       f"{mean:.2e}）——文库复杂度离群，建议核查该样本建库/上样环节")]
+    return []
+
+
 def check_dup_cv(dup_pct, excluded=()):
     """批内重复率变异系数 CV 过大 → P1（TH-38=20%，DEC-40）：重复率是建库/上样
     环节的指纹，批内离散常指向文库质量或上样量差异——比 Step6 深度 CV（TH-35）

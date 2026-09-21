@@ -194,6 +194,30 @@ class TestDupStatsSummary(unittest.TestCase):
         self.assertIsNone(alerts.dup_stats_summary(None))
 
 
+class TestElsMinZP1(unittest.TestCase):
+    """★ ELS 最低样本 Z 告警锚（TH-39/DEC-42，RUN-58）：Z ≤ -3 SD → P1——
+    文库复杂度离群；总体 SD 口径单点 Z 极值=-√(n-1)，<10 样本数学不可达"""
+
+    def test_els_min_z_p1_fires(self):
+        els = {f"S{i}": 1.0e7 for i in range(10)}
+        els["OUT"] = 1e6                      # z=-√10≈-3.16
+        a = alerts.check_els_min_z(els)
+        self.assertEqual(len(a), 1)
+        self.assertEqual(a[0][0], "P1")
+        self.assertIn("OUT", a[0][1])
+        self.assertIn("Z=-3.2", a[0][1])
+        self.assertIn("-3 SD", a[0][1])       # 阈值点名
+        self.assertIn("建库/上样", a[0][1])   # 处置指引
+
+    def test_els_min_z_scope(self):
+        self.assertEqual(alerts.check_els_min_z({"A": 100, "B": 200}), [])  # 温和离散
+        self.assertEqual(alerts.check_els_min_z({"A": 5, "B": 5}), [])      # SD=0 不定标
+        els = {f"S{i}": 1.0e7 for i in range(10)}
+        els["NTC"] = 3                        # 对照近 0——排除后不误报
+        self.assertEqual(alerts.check_els_min_z(els, excluded={"NTC"}), [])
+        self.assertEqual(alerts.check_els_min_z({"A": 1.0}), [])            # 单样本
+
+
 class TestDupCvP1(unittest.TestCase):
     """★ Step3 批内变异 CV（DEC-40/RUN-56）：批内重复率 CV >TH-38（20%）→ P1——
     重复率是建库/上样的指纹，批内离散比 Step6 深度 CV 早三步暴露批次异质"""

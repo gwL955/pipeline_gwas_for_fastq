@@ -307,6 +307,7 @@ Step3 重复率、Step6 深度/20X/捕获效率、完成通知质量行）与 St
 | Step 2 · 比对 | mapped <95% 或 properly paired <85% | P2 |
 | Step 3 · 去重 | 重复率 >30%（建库复杂度告急） | P2 |
 | Step 3 · 批内变异 CV | 批内重复率 CV >20%（TH-38，排除对照；样本 <2 不判）——疑似批次异质 | P1 |
+| Step 3 · ELS 离群 | ELS 最低样本 Z ≤-3 SD（TH-39，排除对照；SD=0 不判）——文库复杂度离群 | P1 |
 | Step 5 · 对账·数量 | 矩阵行数 ≠ 靶区记录数（view -R 同口径对账，DEC-11） | P2 |
 | Step 5 · 对账·新鲜度 | 关键 VCF mtime < 本次启动（断点续跑复用旧产物） | P2 |
 | Step 6 · 捕获/覆盖/口径 | 捕获效率 PCT_SELECTED <85% / mean depth <50× / 20X <95% / Ti/Tv <2.0 / call rate <95% | P2 |

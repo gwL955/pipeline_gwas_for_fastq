@@ -79,6 +79,8 @@
 
 | RUN-57 | 09-21 1x:xx | 用户指示：step3 增加重复率的分位数、min\max\SD，ELS 最小值增加显示其 Z 值 SD | ✅ | DEC-41：①alerts.dup_stats_summary——"min-max x-x%｜SD x%｜P25/P50/P75 x/x/x%"（statistics.quantiles inclusive 线性插值；SD 总体口径与 CV 一致；排除对照；<2 样本 None→n/a），step3 metrics 行插入（均值行与批内 CV 行之间）；②els_summary 最低样本附（Z=±x.x）=(min-均值)/SD（SD=0 全等批无法定标不附；单值无离散不附），既有 均值/方差/最低 断言全兼容。测试 175→178（TestElsMinZscore：{100,200}→Z=-1.0 精确/三样本 -1.0/全等不附/单值不附；TestDupStatsSummary：字段与 inclusive 分位精确值/对照排除/<2 None） | alerts.py、run_pipeline.py；design_doc/DESIGN.md DEC-41/CHANGELOG 2.31.0；tests/test_alerts.py |
 
+| RUN-58 | 09-21 1x:xx | 用户指示：ELS 最小值的 Z 值设置告警阈值 -3 SD，级别 P1 | ✅ | DEC-42/TH-39：config.ELS_MIN_Z_P1=-3.0（check_design 镜像集登记）；alerts.check_els_min_z——ELS 最低样本 Z ≤ 阈值 → P1（消息点名样本/Z 值/阈值/ELS vs 批均值，附建库-上样环节核查指引），对照排除、SD=0 不判；step3 anomalies 链接入（与 v2.31.0 播报型 Z 值配套：els_summary 始终可见、check 只在越界报警）。**口径注记**：总体 SD 下单点 Z 极值=-√(n-1)，批内 <10 样本数学上不可能达到 -3（分布性质非漏报，已入 DEC/TH 说明）；49 样本批次（如 260918）可正常触发。测试 178→180（TestElsMinZP1：10 同值+1 离群 → z=-√10≈-3.2 触发 P1 全字段锚；温和离散/SD=0/对照排除/单样本不触发） | alerts.py、run_pipeline.py、config.py、check_design.py；design_doc/DESIGN.md DEC-42/TH-39/CHANGELOG 2.32.0；tests/test_alerts.py |
+
 ## 三、指标速查（最终有效轮：RUN-08/15 数据）<!-- MACHINE -->
 
 | 批次 | 样本 | fastp保留率 | mapped | dup | 20X | raw SNP/INDEL | PASS SNP/INDEL | Ti/Tv |

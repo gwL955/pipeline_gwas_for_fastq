@@ -3,7 +3,7 @@
 ```yaml
 # ---- design-meta（机器可解析锚点，勿手改格式；版本规则见 §0）----
 doc: GWAS-pipeline-design
-version: 2.31.0
+version: 2.32.0
 updated: 2026-09-19
 owner_human: gewenlong
 owner_machine: ZCode(GLM)
@@ -178,6 +178,7 @@ Step 6 的矩阵裁决/每样本重建与 MultiQC 串行。HC `--native-pair-hmm
 | DEC-39 | **对照排除改 token 级匹配（v2.29.0）**：`--exclude-samples`（默认 NTC）命中口径从整串相等放宽为**整串相等或 [_\-.] 分隔 token 相等（均不区分大小写）**；`self.excluded` 存命中的样本名（原为排除项字面），全部消费者（calling 名单/指标豁免/HsMetrics 对照口径/TH-21·34 污染监控的 NTC 识别）随之生效；命中样本逐个 INFO 播报，未命中项 INFO 说明（无对照批次不刷屏）；部分子串不误中（MNTCX 不中 NTC） | 外部服务器实跑：外送平铺对照名带长前缀（如 `..._ZM20260918D_NTC_combined`），整串比对 `"NTC"` 漏排——排除集为空 → NTC 进联合分型、污染监控同时失效（RUN-55） |
 | DEC-40 | **Step3 通知加入批内变异 CV（v2.30.0）**：去重里程碑 metrics 行增「批内变异 CV x.x%（阈值 20%）」（alerts.cv_of，总体方差口径同 TH-35 深度 CV，排除对照、样本 <2 显 n/a 不判）；超 TH-38（DUP_CV_P1=0.2，P1 级）→ 异常行点名极值区间——重复率是建库/上样环节的指纹，批内离散比 Step6 深度 CV（TH-35 P2）早三步暴露批次异质 | 用户要求（RUN-56）：Step3 钉钉通知加入批内变异 CV 指标，P1 阈值 20% |
 | DEC-41 | **Step3 统计播报扩容（v2.31.0）**：①重复率分布——新增 `dup_stats_summary`："min-max x-x%｜SD x%｜P25/P50/P75 x/x/x%"（分位=statistics.quantiles 线性插值 inclusive 口径；总体方差 SD 与 CV 同口径；排除对照；<2 样本 n/a），与均值行、批内 CV（TH-38）共同刻画批次重复率形态；②ELS 最低值附 **Z 值**（`（Z=±x.x）`=偏离均值的 SD 倍数，直观判断该样本文库复杂度是否离群；SD=0 无法定标不附） | 用户要求（RUN-57）：重复率加分位数/min/max/SD，ELS 最小值显示 Z 值 SD |
+| DEC-42 | **ELS 最低值 Z 告警（v2.32.0）**：`check_els_min_z`——ELS 最低样本 Z ≤ TH-39（-3 SD）→ P1，消息点名样本/Z 值/阈值/ELS 与批均值对比，附建库-上样环节核查指引；与 v2.31.0 的播报型 Z 值（els_summary 附注）配套成"可见+可判"；总体 SD 口径下单点 Z 极值=-√(n-1)，批内 <10 样本数学上不可达阈值（属分布性质非漏报）；对照排除、SD=0 不判 | 用户要求（RUN-58）：ELS 最小值 Z 值设告警阈值 -3 SD、级别 P1 |
 
 ## 5. 统一口径与阈值总表（TH = config.py 镜像）<!-- HUMAN 可改值；MACHINE 同步 config 后过校验 -->
 
@@ -223,6 +224,7 @@ Step 6 的矩阵裁决/每样本重建与 MultiQC 串行。HC `--native-pair-hmm
 | TH-36 | RECAL_OBS_MIN_P2 | 100000 | BQSR recal M 事件观测数 <1e5 → P2（校准不可信） |
 | TH-37 | MD5_MANIFEST_MAX_BYTES | 512000 | md5 清单识别体积上限：≥此值不认清单（DEC-36，防同名大文本文件误认） |
 | TH-38 | DUP_CV_P1 | 0.2 | Step3 批内重复率变异系数 CV >20% → P1（批次异质早预警，DEC-40） |
+| TH-39 | ELS_MIN_Z_P1 | -3.0 | Step3 ELS 最低样本 Z ≤-3 SD → P1（文库复杂度离群，DEC-42；总体 SD 口径单点极值 -√(n-1)，<10 样本数学不可达） |
 
 ### 5.2 分级告警体系（DEC-21/22，三级）
 
@@ -249,6 +251,7 @@ Step 6 的矩阵裁决/每样本重建与 MultiQC 串行。HC `--native-pair-hmm
 | Step 2 · 比对 | mapped <TH-06 或 properly paired <TH-07 | P2 |
 | Step 3 · 去重 | 重复率 > TH-09（建库复杂度告急） | P2 |
 | Step 3 · 批内变异 CV | 批内重复率 CV > TH-38（阈值 20%，排除对照；样本 <2 不判）——疑似批次异质（文库质量/上样量差异） | P1 |
+| Step 3 · ELS 离群 | ELS 最低样本 Z ≤ TH-39（-3 SD；排除对照；SD=0 不判；<10 样本数学不可达〔单点极值 -√(n-1)〕）——文库复杂度离群 | P1 |
 | Step 4 · 校准可信 | BQSR recal M 事件观测数 < TH-36 | P2 |
 | Step 5 · 对账·数量 | 矩阵行数 ≠ 靶区记录数（view -R 同口径，DEC-11） | P2 |
 | Step 5 · 对账·新鲜度 | 关键 VCF mtime < 本次启动（断点续跑复用旧产物） | P2 |
@@ -405,7 +408,7 @@ CI（.github/workflows/ci.yml）在 py3.10/3.12 矩阵执行。
 
 ### 9.2 迁移/重建验证顺序（DEC-12）
 
-1. `./run_tests.sh` 全绿（全部用例数见 §9.1 各文件，当前共 178）
+1. `./run_tests.sh` 全绿（全部用例数见 §9.1 各文件，当前共 180）
 2. `cp .env.example .env` 填 webhook → `python3 run_pipeline.py --notify-test`（连通性）
 3. `python3 run_pipeline.py --dry-run --batch <小批次>`（容器/参考文件/路径与资源计划）
 4. `python3 run_pipeline.py --resource-profile low --dry-run`（低配档口径）
@@ -413,7 +416,7 @@ CI（.github/workflows/ci.yml）在 py3.10/3.12 矩阵执行。
 
 ### 9.3 重建完成判据
 
-178 用例 + check_design 全绿；`--version` 输出与本文档 version 一致；dry-run 零落盘；
+180 用例 + check_design 全绿；`--version` 输出与本文档 version 一致；dry-run 零落盘；
 单批次实跑 success 且 Step 6 交付目录含 VCF+tbi+MultiQC，`md5sum -c` 全过。
 
 ## 10. 变更日志（CHANGELOG）<!-- 人机共写：每方改动各记一行 -->
@@ -492,6 +495,8 @@ CI（.github/workflows/ci.yml）在 py3.10/3.12 矩阵执行。
 | 2.30.0 | 2026-09-21 | 机 | DEC-40/TH-38：config.DUP_CV_P1=0.2（镜像集登记）+ alerts.cv_of/check_dup_cv（总体方差口径、排除对照、<2 不判）；step3 通知 metrics 增「批内变异 CV x.x%（阈值 20%）」、anomalies 接 check_dup_cv（点名极值区间）；测试 173→175；RUN-56 |
 | 2.31.0 | 2026-09-21 | 人 | Step3 通知扩容：重复率加分位数、min/max/SD；ELS 最小值显示 Z 值（SD 单位） |
 | 2.31.0 | 2026-09-21 | 机 | DEC-41：alerts.dup_stats_summary（min-max/SD/P25-P50-P75，inclusive 分位）接入 step3 metrics 行；els_summary 最低值附（Z=±x.x）（SD=0 不附）；测试 175→178（Z 值口径锚：-1.0 精确值/全等不附/单值不附 + 分布字段锚：inclusive 分位/对照排除/<2 None）；RUN-57 |
+| 2.32.0 | 2026-09-21 | 人 | ELS 最小值的 Z 值设告警阈值 -3 SD，级别 P1 |
+| 2.32.0 | 2026-09-21 | 机 | DEC-42/TH-39：config.ELS_MIN_Z_P1=-3.0（镜像集登记）+ alerts.check_els_min_z（Z≤阈值 → P1，点名样本/Z/阈值/ELS vs 批均值+核查指引）；step3 anomalies 接入；测试 178→180（10+1 样本 z=-3.2 触发锚/温和离散·SD=0·对照排除·单样本不触发锚）；RUN-58 |
 
 ## 11. 证据索引 <!-- MACHINE -->
 
@@ -500,7 +505,7 @@ CI（.github/workflows/ci.yml）在 py3.10/3.12 矩阵执行。
 | 运行台账（每轮） | pipeline/design_doc/RUN_HISTORY.md |
 | 验收运行（0_raw_data_test） | results/260422_20260914/、results/260422_20260916/ 等（运行日志在各批次 logs/） |
 | 交付 | Output/<批次>_<日期>/ + INDEX.md（累积） |
-| 测试集与 CI | pipeline/tests/（178 用例）+ run_tests.sh + .github/workflows/ci.yml |
+| 测试集与 CI | pipeline/tests/（180 用例）+ run_tests.sh + .github/workflows/ci.yml |
 | 使用说明/与笔记差异 | pipeline/README.md |
 | 环境参数 | pipeline/.env（密钥，600）+ pipeline/.env.example（模板） |
 | 命令参考快照 | pipeline/design_doc/notes_code_reference.md |

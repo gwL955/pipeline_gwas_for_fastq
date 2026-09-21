@@ -584,7 +584,9 @@ class BatchCtx:
                                + alerts.check_dup(self.metrics.get("dup_pct"),
                                                   excluded=self.excluded)
                                + alerts.check_dup_cv(self.metrics.get("dup_pct"),
-                                                     excluded=self.excluded),
+                                                     excluded=self.excluded)
+                               + alerts.check_els_min_z(self.metrics.get("els"),
+                                                        excluded=self.excluded),
                      artifacts=f"bam/*/*.markdup.bam "
                                + alerts.artifact_summary(os.path.join(self.work, "bam", "*", "*.markdup.bam")),
                      log_hint=f"tail -f {self.work}/logs/sample_<样本>.self.log")
