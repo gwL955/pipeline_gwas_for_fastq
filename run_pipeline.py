@@ -101,8 +101,10 @@ def _parallel(jobs, workers):
     return results
 
 
-def _fmt_gb(n):
-    return f"{n / 1e9:.2f}GB"
+def _fmt_gib(n):
+    """输入体量按二进制 GiB（1024³）计——曾十进制 1e9（GB），与 ls -lh 等
+    工具的二进制口径不一致（RUN-54）"""
+    return f"{n / (1 << 30):.2f}GiB"
 
 
 class BatchCtx:
@@ -230,7 +232,7 @@ class BatchCtx:
                           for f in si.r1 + si.r2)
         lanes_expected = sum(len(si.r1) for si in valid.values())
         n_initial = len(valid)
-        self.log.info(f"有效样本 {n_initial} 个，输入体量 {_fmt_gb(input_bytes)}")
+        self.log.info(f"有效样本 {n_initial} 个，输入体量 {_fmt_gib(input_bytes)}")
 
         # ── 开跑前检查（磁盘 / 依赖文件 / 样本名规范）──
         pre_anoms = []
@@ -274,7 +276,7 @@ class BatchCtx:
             p = self.plan
             lvl = alerts.worst_level(pre_anoms)
             body = (f"#### [GWAS][{lvl}] {self.batch}批次 · 启动"
-                    f"\n\n样本: {len(valid)}/{n_initial} 有效｜输入 {_fmt_gb(input_bytes)}｜"
+                    f"\n\n样本: {len(valid)}/{n_initial} 有效｜输入 {_fmt_gib(input_bytes)}｜"
                     f"{datetime.now().strftime('%m-%d %H:%M')}"
                     f"\n\n指标: 探测 {p.cpu_detected} 线程 / {p.mem_detected} GB｜"
                     f"profile {p.profile}（预留 {p.reserve_cores} 核 + {p.reserve_mem_gb} GB）"
@@ -336,7 +338,7 @@ class BatchCtx:
         _step_notify(self.notify_on, self.batch, 0, "清点与Lane合并", self.log,
                      total_steps=self.args.step,
                      samples=f"{len(self.merged)}/{n_initial} 成功 | Lane 合并 {lanes_merged}/{lanes_expected}",
-                     metrics=f"输入 {_fmt_gb(input_bytes)} | md5 {md5_txt}"
+                     metrics=f"输入 {_fmt_gib(input_bytes)} | md5 {md5_txt}"
                              f" | 无效样本 {len(invalid)}",
                      anomalies=[("P1", f"{sm} {rs}（样本终止，其余照常）")
                                 for sm, rs in merge_failed.items()],

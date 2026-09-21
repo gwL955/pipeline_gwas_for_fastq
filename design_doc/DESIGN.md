@@ -3,7 +3,7 @@
 ```yaml
 # ---- design-meta（机器可解析锚点，勿手改格式；版本规则见 §0）----
 doc: GWAS-pipeline-design
-version: 2.27.0
+version: 2.28.0
 updated: 2026-09-19
 owner_human: gewenlong
 owner_machine: ZCode(GLM)
@@ -278,6 +278,7 @@ Step 6 的矩阵裁决/每样本重建与 MultiQC 串行。HC `--native-pair-hmm
 每批次：启动（样本数/输入体量/资源计划+预检结论），**先于 md5 校验发出——第一条消息必须是批次启动信息，md5 哈希 GB 级输入可达数分钟；md5 结果经 Step0 里程碑三态与 P0 失败通知传达，DEC-38**）→ Step 0-6 每步里程碑（标题含
 "（共 X 步）"，X=--step：Step 0 为清点预备步不计入，全流程=6；DEC-32，RUN-47
 修正首版 +1 口径）→ 完成/失败；
+输入体量按二进制 GiB（1024³，`_fmt_gib`，RUN-54）。
 多批次另有总览。**交付文件推送（DEC-24，v2.15.0）：批次全部结束后逐成功批次
 `Output/<批次>_<日期>/` 打包 zip → 说明消息 + 文件卡片**（多批次统一发送防淹没；
 zip 超 20MB → 分卷压缩多发，DEC-27）。`DINGTALK_MILESTONES=0` 只发异常级（P0/P1）。
@@ -399,7 +400,7 @@ CI（.github/workflows/ci.yml）在 py3.10/3.12 矩阵执行。
 
 ### 9.2 迁移/重建验证顺序（DEC-12）
 
-1. `./run_tests.sh` 全绿（全部用例数见 §9.1 各文件，当前共 170）
+1. `./run_tests.sh` 全绿（全部用例数见 §9.1 各文件，当前共 171）
 2. `cp .env.example .env` 填 webhook → `python3 run_pipeline.py --notify-test`（连通性）
 3. `python3 run_pipeline.py --dry-run --batch <小批次>`（容器/参考文件/路径与资源计划）
 4. `python3 run_pipeline.py --resource-profile low --dry-run`（低配档口径）
@@ -407,7 +408,7 @@ CI（.github/workflows/ci.yml）在 py3.10/3.12 矩阵执行。
 
 ### 9.3 重建完成判据
 
-170 用例 + check_design 全绿；`--version` 输出与本文档 version 一致；dry-run 零落盘；
+171 用例 + check_design 全绿；`--version` 输出与本文档 version 一致；dry-run 零落盘；
 单批次实跑 success 且 Step 6 交付目录含 VCF+tbi+MultiQC，`md5sum -c` 全过。
 
 ## 10. 变更日志（CHANGELOG）<!-- 人机共写：每方改动各记一行 -->
@@ -478,6 +479,8 @@ CI（.github/workflows/ci.yml）在 py3.10/3.12 矩阵执行。
 | 2.26.0 | 2026-09-21 | 机 | DEC-37：三识别正则 `\.(?:fastq|fq)\.gz`（互斥性保持）；ScanResult 增 .unmatched（md5 清单排除）+ run_summary samples.unmatched；跳过路径 WARN/钉钉点名未识别文件（≤5 示例+正确扩展名指引）、有效批次 INFO 计数；测试 166→169（fq.gz 三布局+混批 Lane 锚/unmatched 排除 md5 锚/E2E 跳出不静默锚）；RUN-52 |
 | 2.27.0 | 2026-09-21 | 人 | 修正通知时序：启动通知应在程序开始、md5 校验之前发出（第一条信息=批次启动信息）；md5 在 step0 |
 | 2.27.0 | 2026-09-21 | 机 | DEC-38：step0_scan 通知块移至 md5 块之前，md5 异常摘出启动 pre_anoms（Step0 里程碑三态+P0 失败通知兜底，P0 阻断路径不变）；测试 169→170（TestStartupNotifyOrder 时序锚）；RUN-53 |
+| 2.28.0 | 2026-09-21 | 人 | 启动信息输入大小改二进制（1024）口径 |
+| 2.28.0 | 2026-09-21 | 机 | _fmt_gb→_fmt_gib：÷1024³ 并以 GiB（IEC）标注（曾十进制 1e9 GB，与 ls -lh/du 二进制口径不一致）；日志/启动通知/Step0 里程碑三处同步；测试 170→171（二进制口径锚）；RUN-54 |
 
 ## 11. 证据索引 <!-- MACHINE -->
 
@@ -486,7 +489,7 @@ CI（.github/workflows/ci.yml）在 py3.10/3.12 矩阵执行。
 | 运行台账（每轮） | pipeline/design_doc/RUN_HISTORY.md |
 | 验收运行（0_raw_data_test） | results/260422_20260914/、results/260422_20260916/ 等（运行日志在各批次 logs/） |
 | 交付 | Output/<批次>_<日期>/ + INDEX.md（累积） |
-| 测试集与 CI | pipeline/tests/（170 用例）+ run_tests.sh + .github/workflows/ci.yml |
+| 测试集与 CI | pipeline/tests/（171 用例）+ run_tests.sh + .github/workflows/ci.yml |
 | 使用说明/与笔记差异 | pipeline/README.md |
 | 环境参数 | pipeline/.env（密钥，600）+ pipeline/.env.example（模板） |
 | 命令参考快照 | pipeline/design_doc/notes_code_reference.md |

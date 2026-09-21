@@ -71,6 +71,8 @@
 
 | RUN-53 | 09-21 1x:xx | 用户指示：启动通知在 md5 校验完成后才发送，但第一条信息应当是批次启动信息——应在程序开始、md5 校验之前发出 | ✅ | DEC-38：step0_scan 通知顺序重排——开跑前检查（磁盘/依赖/批次名/样本名，毫秒级）→ 启动通知 → md5（GB 级哈希可达数分钟）→ P0 判定；md5 异常摘出启动 pre_anoms（曾随启动通知可见，现由 Step0 里程碑三态（DEC-36）与 P0 失败通知（DEC-21，阻断路径不变）兜底）；启动消息体不变（仍含预检结论，仅不含 md5 项）。测试 169→170（TestStartupNotifyOrder：BatchCtx 直构 + mock dingtalk.notify/scanner.verify_md5 记录调用顺序，断言第一个调用是『批次 · 启动』且先于 md5） | run_pipeline.py；design_doc/DESIGN.md DEC-38/CHANGELOG 2.27.0；tests/test_misc.py |
 
+| RUN-54 | 09-21 1x:xx | 用户指示：启动信息输入大小统计口径改二进制（1024） | ✅ | _fmt_gb→_fmt_gib：÷1024³ 并以 GiB（IEC）标注，调用点三处同步（日志"有效样本…输入体量"/启动通知"输入 X"/Step0 里程碑"输入 X | md5 三态"）；曾十进制 1e9+GB 后缀，与 ls -lh/du 等工具的二进制口径不一致（同一批数据两处读数差 ~7%）；磁盘统计（free_gb/1e9，DISK_*_GB 阈值）为独立口径未动。测试 170→171（TestInputSizeFormatting：1GiB/3.50GiB/小值进位/不得残留 GB 后缀） | run_pipeline.py；tests/test_misc.py |
+
 ## 三、指标速查（最终有效轮：RUN-08/15 数据）<!-- MACHINE -->
 
 | 批次 | 样本 | fastp保留率 | mapped | dup | 20X | raw SNP/INDEL | PASS SNP/INDEL | Ti/Tv |

@@ -698,6 +698,18 @@ class TestBatchExceptionPath(unittest.TestCase):
             self.assertIn("fastq.gz/.fq.gz", r.stdout)   # 指引正确扩展名
 
 
+class TestInputSizeFormatting(unittest.TestCase):
+
+    def test_fmt_gib_binary_unit(self):
+        """★ 输入体量二进制口径锚（RUN-54）：_fmt_gib 按 1024³（GiB）计并带
+        IEC 后缀——曾十进制 1e9（GB），与 ls -lh/du 等工具的二进制口径不一致"""
+        from run_pipeline import _fmt_gib
+        self.assertEqual(_fmt_gib(1 << 30), "1.00GiB")
+        self.assertEqual(_fmt_gib(3 * (1 << 30) + 512 * (1 << 20)), "3.50GiB")
+        self.assertEqual(_fmt_gib(5 * (1 << 20)), "0.00GiB")
+        self.assertNotIn("GB", _fmt_gib(1 << 30))
+
+
 class TestStartupNotifyOrder(unittest.TestCase):
 
     def test_startup_notify_before_md5(self):
