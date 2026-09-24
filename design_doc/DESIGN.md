@@ -3,7 +3,7 @@
 ```yaml
 # ---- design-meta（机器可解析锚点，勿手改格式；版本规则见 §0）----
 doc: GWAS-pipeline-design
-version: 2.33.0
+version: 2.34.0
 updated: 2026-09-19
 owner_human: gewenlong
 owner_machine: ZCode(GLM)
@@ -124,7 +124,7 @@ sorted.bed/interval_list 与 bed 同目录生成；sorted.bed 按 genome.dict �
 | **3 去重** | `gatk MarkDuplicates` → markdup.bam + metrics → flagstat/stats（去重前 duplicates 行不采集） | `bam/<样本>/<样本>.markdup.bam`〔markdup.bam+metrics〕 | P1：批内重复率 CV>TH-38 20%（DEC-40）；P2：dup>30%（TH-09）；**里程碑"指标:"行=重复率均值 + ELS 统计（均值/方差/最低值+对应样本，DEC-32 排除对照）** |
 | **4 BQSR** | `gatk BaseRecalibrator`（dbsnp+Mills）→ recal.table → `ApplyBQSR` → **BQSR 前后 flagstat 逐行一致断言**（不一致该样本失败隔离） | `bam/<样本>/<样本>.recal.table`、`<样本>.markdup.BQSR.bam`〔BQSR bam+table〕 | P2：recal M 事件观测数<1e5（TH-36，校准不可信） |
 | **5 变异检测** | BedToIntervalList 准备（`--UNIQUE true` 重叠/相邻区间去重合并 + `--DROP_MISSING_CONTIGS true` 丢字典外 contig，DEC-26；sorted.bed 生成按 genome.dict 过滤 contig、派生文件随源 mtime 失效重建，DEC-28） → 每样本 `gatk HaplotypeCaller -ERC GVCF`（**-L interval_list** 字典口径，DEC-28；靶区±100bp，样本级并行）→ gvcf.list（sorted，DEC-05）→ **cohort 复跑守卫（DEC-34）**：现存关键 VCF header 样本清单（`bcftools query -l`）≠ 本次 hc_ok → 作废 cohort/matrix/per_sample_vcf 全部派生产物重算（防 HC 失败样本补回后被幂等 SKIP 沿用旧口径；**连同 cohort 级 bcftools_stats 与 MultiQC 报告一并作废——二者自带幂等 SKIP 会沿用陈旧文件，RUN-49 补漏**） → 批次内 `CombineGVCFs→GenotypeGVCFs`（串行）→ `bcftools norm -m -any` → SelectVariants SNP/INDEL → VariantFiltration 硬过滤（SNP：QD2/QUAL30/SOR3/FS60/MQ40/MQRankSum/ReadPosRankSum；INDEL：QD2/QUAL30/SOR10/FS200/ReadPosRankSum）→ concat → **FILTER 列出现 `.` 判错** → PASS 提取 → 双口径矩阵导出（`query -R`）+ 每样本 hardfiltered/PASS 拆分（`view -s`，**名单=实际进 cohort 的 hc_ok**，DEC-34） | `gvcf/<样本>.g.vcf.gz`、`cohort/cohort.{raw→split→snp/indel→hardfiltered→PASS}.vcf.gz`、`matrix/genotype_matrix.tsv`、`matrix/genotype_detail_PASS.tsv`、`per_sample_vcf/<样本>.{hardfiltered,PASS}.vcf.gz` | cohort 级失败 raise 中断批次；P2：对账·数量（矩阵行数 vs `view -R` 计数，DEC-11 同口径）、对账·新鲜度（关键 VCF mtime<启动） |
-| **6 汇总与交付** | mosdepth×2（markdup/BQSR bam）→ `CollectHsMetrics`（BQSR bam）→ **矩阵 `./.` 裁决**（mosdepth bqsr regions 深度 DP≥TH-15 改判 0/0）→ 每样本 PASS VCF 重建（`view -s` + GT 替换，其余字段原样）→ **MultiQC 最终报告（此时全部流程结束、QC 齐全）** → 交付导出 Output/ | `qc/mosdepth|hs metrics|multiqc`、`matrix/genotype_matrix.adjudicated.tsv`、`per_sample_vcf/<样本>.PASS.adjudicated.vcf.gz(+.tbi)`、`Output/<批次>_<日期>/` 全套 | P1：PASS 裁决 VCF 0 记录（交付为空）、NTC 靶深>10×（TH-21）；P2：捕获效率 PCT_SELECTED<85/depth<50/20X<95/Ti-Tv<2.0/call rate<95（TH-14/11/13/22/23）、批次深度 CV>0.5（TH-35） |
+| **6 汇总与交付** | mosdepth×2（markdup/BQSR bam）→ `CollectHsMetrics`（BQSR bam）→ **矩阵 `./.` 裁决**（mosdepth bqsr regions 深度 DP≥TH-15 改判 0/0）→ 每样本 PASS VCF 重建（`view -s` + **按记录级键 (CHROM,POS,REF,ALT) GT 替换**，其余字段原样，DEC-44）→ **MultiQC 最终报告（此时全部流程结束、QC 齐全）** → 交付导出 Output/ | `qc/mosdepth|hs metrics|multiqc`、`matrix/genotype_matrix.adjudicated.tsv`、`per_sample_vcf/<样本>.PASS.adjudicated.vcf.gz(+.tbi)`、`Output/<批次>_<日期>/` 全套 | P1：PASS 裁决 VCF 0 记录（交付为空）、NTC 靶深>10×（TH-21）；P2：捕获效率 PCT_SELECTED<85/depth<50/20X<95/Ti-Tv<2.0/call rate<95（TH-14/11/13/22/23）、批次深度 CV>0.5（TH-35） |
 | 每步之后 | `disk_guard`：Step 间磁盘复查 | — | P0：剩余<DISK_MIN_FREE_GB 立即终止批次（TH-24） |
 
 并行模型（DEC-35 按步骤类型分化 workers）：Step 2 比对按 `plan.workers`（每路含
@@ -180,6 +180,7 @@ Step 6 的矩阵裁决/每样本重建与 MultiQC 串行。HC `--native-pair-hmm
 | DEC-41 | **Step3 统计播报扩容（v2.31.0）**：①重复率分布——新增 `dup_stats_summary`："min-max x-x%｜SD x%｜P25/P50/P75 x/x/x%"（分位=statistics.quantiles 线性插值 inclusive 口径；总体方差 SD 与 CV 同口径；排除对照；<2 样本 n/a），与均值行、批内 CV（TH-38）共同刻画批次重复率形态；②ELS 最低值附 **Z 值**（`（Z=±x.x）`=偏离均值的 SD 倍数，直观判断该样本文库复杂度是否离群；SD=0 无法定标不附） | 用户要求（RUN-57）：重复率加分位数/min/max/SD，ELS 最小值显示 Z 值 SD |
 | DEC-42 | **ELS 最低值 Z 告警（v2.32.0）**：`check_els_min_z`——ELS 最低样本 Z ≤ TH-39（-3 SD）→ P1，消息点名样本/Z 值/阈值/ELS 与批均值对比，附建库-上样环节核查指引；与 v2.31.0 的播报型 Z 值（els_summary 附注）配套成"可见+可判"；总体 SD 口径下单点 Z 极值=-√(n-1)，批内 <10 样本数学上不可达阈值（属分布性质非漏报）；对照排除、SD=0 不判 | 用户要求（RUN-58）：ELS 最小值 Z 值设告警阈值 -3 SD、级别 P1 |
 | DEC-43 | **终端 SIGHUP 根治：启动即脱离控制终端（v2.33.0）**：`ensure_detached()` 在 main() 最前（parse_args/capture_stdio/线程之前）执行——`/dev/tty` 判前台（前台交互保留 Ctrl+C 语义不脱离）；无终端且非会话首 → `os.setsid()` 直接建新会话；已是会话首（外部 setsid）→ 天然免疫；进程组长（交互 shell 后台作业，直接 setsid 必 EPERM）→ **fork+setsid**（父进程即退，子进程续跑并打印新 PID）。新会话无控制终端 → 终端/SSH 关闭的 SIGHUP **无从发出**，不再依赖任何子进程的信号处置位（含容器内部链）。SIG_IGN（主进程直收信号兜底）与 GATK -Xrs 降为纵深防御层 | RUN-59 实测证伪 DEC-33 完备性：v2.29.0 下存活 sh 子进程 SigIgn bit0=1（SIG_IGN 确实传到 sh 层），但 apptainer 容器内部进程链重置信号继承位，12 个 GATK JVM（7 ApplyBQSR+5 BaseRecalibrator）同瞬 17:22:18 被 SIGHUP 杀死（"Hangup" exit=129），主进程存活——处置位对抗不可行，唯一可靠口径是让信号无从发出 |
+| DEC-44 | **交付 ADJ VCF 多等位位点 GT 覆盖修复（v2.34.0）**：裁决重建改**记录级键**——gt_tsv 由 3 列（CHROM,POS,GT）升 5 列（+REF/ALT），rebuild_sample_vcf 按 (CHROM,POS,REF,ALT) 逐记录回写；5 列严格匹配不回退（矩阵经 -R 靶区限制导出，同位置可能只含部分记录，位置级回退会把矩阵内记录 GT 盖到矩阵外记录上——首轮修复实测 4 条此害后收敛）；旧 3 列格式仅在"该位置恰一行"时生效（单记录历史行为不变）；未命中记录保留原 GT。曾按 (CHROM,POS) 单键：norm 拆分后同位点多条记录（多等位 SNP/`*` 星号等位/多插入）字典后行覆盖前行且回写盖同一 GT 到全部记录——`*`/次等位常排最后，其 0/0 或 0\|1 "获胜" | 远程 GIAB 对比（RUN-60/BUG-ADJ-GT-001）：NA12878 81 个不一致位点中 24 个由此造成（假阴 17/纯合变杂合 5/等位错配 2），illumina 批 1032、external 批 1227 个多记录位置全部样本受影响；本地 260918_test 批复现 36 条非裁决性不一致，修复后 0 |
 
 ## 5. 统一口径与阈值总表（TH = config.py 镜像）<!-- HUMAN 可改值；MACHINE 同步 config 后过校验 -->
 
@@ -409,7 +410,7 @@ CI（.github/workflows/ci.yml）在 py3.10/3.12 矩阵执行。
 
 ### 9.2 迁移/重建验证顺序（DEC-12）
 
-1. `./run_tests.sh` 全绿（全部用例数见 §9.1 各文件，当前共 182）
+1. `./run_tests.sh` 全绿（全部用例数见 §9.1 各文件，当前共 186）
 2. `cp .env.example .env` 填 webhook → `python3 run_pipeline.py --notify-test`（连通性）
 3. `python3 run_pipeline.py --dry-run --batch <小批次>`（容器/参考文件/路径与资源计划）
 4. `python3 run_pipeline.py --resource-profile low --dry-run`（低配档口径）
@@ -417,7 +418,7 @@ CI（.github/workflows/ci.yml）在 py3.10/3.12 矩阵执行。
 
 ### 9.3 重建完成判据
 
-182 用例 + check_design 全绿；`--version` 输出与本文档 version 一致；dry-run 零落盘；
+186 用例 + check_design 全绿；`--version` 输出与本文档 version 一致；dry-run 零落盘；
 单批次实跑 success 且 Step 6 交付目录含 VCF+tbi+MultiQC，`md5sum -c` 全过。
 
 ## 10. 变更日志（CHANGELOG）<!-- 人机共写：每方改动各记一行 -->
@@ -500,6 +501,8 @@ CI（.github/workflows/ci.yml）在 py3.10/3.12 矩阵执行。
 | 2.32.0 | 2026-09-21 | 机 | DEC-42/TH-39：config.ELS_MIN_Z_P1=-3.0（镜像集登记）+ alerts.check_els_min_z（Z≤阈值 → P1，点名样本/Z/阈值/ELS vs 批均值+核查指引）；step3 anomalies 接入；测试 178→180（10+1 样本 z=-3.2 触发锚/温和离散·SD=0·对照排除·单样本不触发锚）；RUN-58 |
 | 2.33.0 | 2026-09-21 | 人 | 远程实测证伪 DEC-33 防线：SIG_IGN 传到 sh 层但 apptainer 容器内重置继承位，12 个 -Xrs JVM 同瞬被 SIGHUP 杀死——需根治：脱离控制终端使信号无从发出 |
 | 2.33.0 | 2026-09-21 | 机 | DEC-43：ensure_detached（前台保留/setsid/外部 setsid 免疫/作业组长 fork+setsid 四路）接 main() 最前，[启动] 行播报去向；ignore_sighup/-Xrs 降为纵深防御（docstring、gatk 头注、README §1/§8 同步修订）；测试 180→182（决策矩阵六格锚+执行路径四视角 mock 锚）；本机实测无 tty→fork+setsid 打印续跑 PID、伪终端前台→保留终端语义；RUN-59 |
+| 2.34.0 | 2026-09-24 | 人 | 远程缺陷报告 BUG-ADJ-GT-001：交付 ADJ VCF 多等位位点 GT 被同位点另一条拆分记录覆盖（GIAB 81 不一致中 24 个，假阴 17）——核实并修复 |
+| 2.34.0 | 2026-09-24 | 机 | DEC-44：gt_tsv 3→5 列（+REF/ALT）；rebuild 按记录级键 (CHROM,POS,REF,ALT) 回写、5 列不回退（首轮位置级回退实测 4 条矩阵外误盖后收敛为仅旧 3 列回退）、未命中保留原 GT；测试 182→186（TC-01 多等位纯合覆盖/TC-02 `*` 星号相位/TC-03 双插入/TC-04 单记录+旧格式+未命中防御回归）；本地 260918_test 批 TC-05 实测：旧 ADJ 非裁决性不一致 36 条 → 修复后 0（仅剩 3 条 ./. 裁决设计行为）；远程按报告 TC-05 四位点+TC-06 全量验收；恢复：受影响批次 rm per_sample_vcf/* 后重跑同命令（ADJ 幂等 SKIP 需清除旧产物，Output 按 mtime 自动重拷）；RUN-60 |
 
 ## 11. 证据索引 <!-- MACHINE -->
 
@@ -508,7 +511,7 @@ CI（.github/workflows/ci.yml）在 py3.10/3.12 矩阵执行。
 | 运行台账（每轮） | pipeline/design_doc/RUN_HISTORY.md |
 | 验收运行（0_raw_data_test） | results/260422_20260914/、results/260422_20260916/ 等（运行日志在各批次 logs/） |
 | 交付 | Output/<批次>_<日期>/ + INDEX.md（累积） |
-| 测试集与 CI | pipeline/tests/（182 用例）+ run_tests.sh + .github/workflows/ci.yml |
+| 测试集与 CI | pipeline/tests/（186 用例）+ run_tests.sh + .github/workflows/ci.yml |
 | 使用说明/与笔记差异 | pipeline/README.md |
 | 环境参数 | pipeline/.env（密钥，600）+ pipeline/.env.example（模板） |
 | 命令参考快照 | pipeline/design_doc/notes_code_reference.md |

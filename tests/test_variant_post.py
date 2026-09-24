@@ -42,6 +42,90 @@ class TestAdjudicate(unittest.TestCase):
         self.assertEqual(stats["kept_dotdot"], 4)
         self.assertEqual(out[1], "chr1\t200\tC\tT\t./.\t0/0\t./.")
 
+class TestRebuildMultiallelic(unittest.TestCase):
+    """★ BUG-ADJ-GT-001（DEC-44/RUN-60）：norm 拆分后同位点多条记录（多等位
+    SNP / `*` 星号等位 / 多插入），GT 回写曾按 (CHROM,POS) 单键——后行覆盖前行
+    且同位点所有记录被盖同一 GT（GIAB 对比 81 不一致中 24 个由此造成：假阴
+    17/纯合变杂合 5/等位错配 3）。修复后按记录级键 (CHROM,POS,REF,ALT) 回写"""
+
+    HDR = ("##fileformat=VCFv4.2\n"
+           "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\n")
+
+    def _rebuild(self, td, vcf_body, tsv_body):
+        vcf = os.path.join(td, "in.vcf")
+        tsv = os.path.join(td, "gt.tsv")
+        out = os.path.join(td, "out.vcf")
+        open(vcf, "w").write(self.HDR + vcf_body)
+        open(tsv, "w").write(tsv_body)
+        st = mbc.rebuild_sample_vcf(vcf, tsv, out, "S1")
+        lines = [l.split("\t") for l in open(out).read().splitlines()
+                 if not l.startswith("#")]
+        return st, lines
+
+    def test_tc01_multiallelic_snp_homref_overwrite(self):
+        """TC-01 案例 A（chr12:56004670 rs773115）：G>C 1/1 曾被 G>T 的 0/0 覆盖"""
+        with tempfile.TemporaryDirectory() as td:
+            st, lines = self._rebuild(
+                td,
+                "chr12\t56004670\t.\tG\tC\t100\tPASS\t.\tGT:DP\t1/1:30\n"
+                "chr12\t56004670\t.\tG\tT\t100\tPASS\t.\tGT:DP\t0/0:30\n",
+                "chr12\t56004670\tG\tC\t1/1\n"
+                "chr12\t56004670\tG\tT\t0/0\n")
+            self.assertEqual(st["records"], 2)
+            self.assertEqual(st["gt_changed"], 2)
+            self.assertEqual(lines[0][9], "1/1:30")      # G>C 保留 1/1（原被盖 0/0）
+            self.assertEqual(lines[1][9], "0/0:30")      # G>T 各自的 0/0
+
+    def test_tc02_star_allele_phased(self):
+        """TC-02 案例 B（chr19:16327850）：T>A 的 1|0 曾被 T>* 的 0|1 覆盖（相位保持）"""
+        with tempfile.TemporaryDirectory() as td:
+            st, lines = self._rebuild(
+                td,
+                "chr19\t16327850\t.\tT\tA\t100\tPASS\t.\tGT\t1|0\n"
+                "chr19\t16327850\t.\tT\t*\t100\tPASS\t.\tGT\t0|1\n",
+                "chr19\t16327850\tT\tA\t1|0\n"
+                "chr19\t16327850\tT\t*\t0|1\n")
+            self.assertEqual(lines[0][9], "1|0")
+            self.assertEqual(lines[1][9], "0|1")
+
+    def test_tc03_dual_insertion_het(self):
+        """TC-03 案例 C（chr22:23893563）：1/0 与 0/1 各自保持（曾被统一盖 0/1）"""
+        with tempfile.TemporaryDirectory() as td:
+            st, lines = self._rebuild(
+                td,
+                "chr22\t23893563\t.\tC\tCCATT\t100\tPASS\t.\tGT\t1/0\n"
+                "chr22\t23893563\t.\tC\tCCATTCATT\t100\tPASS\t.\tGT\t0/1\n",
+                "chr22\t23893563\tC\tCCATT\t1/0\n"
+                "chr22\t23893563\tC\tCCATTCATT\t0/1\n")
+            self.assertEqual(lines[0][9], "1/0")
+            self.assertEqual(lines[1][9], "0/1")
+
+    def test_tc04_single_record_regression(self):
+        """TC-04 回归：单记录（含 5 列 gt 行与旧 3 列格式）替换仍生效、
+        其余 FORMAT 原样、多行位置未命中记录键时保留原 GT（防御分支）"""
+        with tempfile.TemporaryDirectory() as td:
+            st, lines = self._rebuild(
+                td,
+                "chr1\t100\t.\tA\tG\t50\tPASS\t.\tGT:DP:AD\t./.:40:20,20\n",
+                "chr1\t100\tA\tG\t0/0\n")            # 裁决 ./. → 0/0
+            self.assertEqual(lines[0][9], "0/0:40:20,20")
+        with tempfile.TemporaryDirectory() as td:
+            st, lines = self._rebuild(
+                td,
+                VCF_BODY,
+                "chr1\t100\t0/0\n")                    # 旧 3 列：位置唯一一行
+            self.assertEqual(lines[0][9], "0/0:40:20,20")
+            self.assertEqual(lines[1][9], "1/1:30:0,30")
+        with tempfile.TemporaryDirectory() as td:
+            st, lines = self._rebuild(                    # 记录键未命中（REF 不符）
+                td,                                       # → 保留原 GT 不动
+                "chr1\t100\t.\tA\tG\t50\tPASS\t.\tGT\t0/1\n"
+                "chr1\t100\t.\tA\tT\t50\tPASS\t.\tGT\t0/0\n",
+                "chr1\t100\tC\tG\t1/1\n"
+                "chr1\t100\tC\tT\t0/0\n")
+            self.assertEqual(lines[0][9], "0/1")
+            self.assertEqual(lines[1][9], "0/0")
+
 
 VCF_BODY = ("##fileformat=VCFv4.2\n"
             "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tS1\n"

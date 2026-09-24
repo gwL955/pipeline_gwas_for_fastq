@@ -961,7 +961,7 @@ class BatchCtx:
                         for line in fa:
                             p = line.rstrip("\n").split("\t")
                             if len(p) > idx:
-                                fo.write("\t".join([p[0], p[1], p[idx]]) + "\n")
+                                fo.write("\t".join([p[0], p[1], p[2], p[3], p[idx]]) + "\n")  # 5 列含 REF/ALT：rebuild 按记录级键回写（DEC-44）
                     st = mbc.rebuild_sample_vcf(raw_plain, gt_tsv, adj_plain, sm)
                     slog.result(f"重建 {sm}: 记录 {st['records']} GT已改 {st['gt_changed']}")
                     rc = self.runner.run(

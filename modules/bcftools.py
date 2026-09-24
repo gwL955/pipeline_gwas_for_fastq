@@ -240,15 +240,25 @@ def adjudicate_matrix(matrix_tsv, regions_reader, samples, dp_min):
 
 
 def rebuild_sample_vcf(in_vcf_plain, gt_tsv, out_plain, sample):
-    """方案一（笔记 5-3）：裁决后矩阵列 → 该样本 VCF 只替换 GT（其余字段原样保留）。纯 Python。"""
-    new_gt = {}
+    """方案一（笔记 5-3）：裁决后矩阵列 → 该样本 VCF 只替换 GT（其余字段原样保留）。纯 Python。
+    GT 行按**记录级键 (CHROM,POS,REF,ALT)** 回写（DEC-44/RUN-60）——曾按 (CHROM,POS)
+    单键：norm 拆分后同位点多条记录（多等位 SNP / `*` 星号等位 / 多插入）时字典后行
+    覆盖前行、且回写把同位点所有记录盖上同一 GT（交付 VCF 假阴/纯合变杂合，GIAB
+    对比 81 不一致位点中 24 个由此造成）。5 列严格按记录键匹配、**不回退**（矩阵经
+    -R 靶区限制导出，同位置可能只含部分记录——位置级回退会把矩阵内记录的 GT 盖
+    到矩阵外记录上）；未命中的记录保留原 GT。3 列旧格式（CHROM,POS,GT）仅在
+    "该位置恰一行"时生效（单记录行为与历史一致）。"""
+    per_record = {}    # (chrom,pos,ref,alt) → gt（5 列记录级，DEC-44）
+    per_pos_legacy = {}   # (chrom,pos) → [gt,...]（仅旧 3 列格式；5 列不回退——
+    #                    矩阵经 -R 靶区限制导出，同位置可能只含部分记录，位置级
+    #                    回退会把矩阵内记录的 GT 盖到矩阵外记录上，RUN-60 实测）
     with open(gt_tsv, encoding="utf-8") as f:
         for line in f:
             p = line.rstrip("\n").split("\t")
             if len(p) >= 5:
-                new_gt[(p[0], int(p[1]))] = p[4]
+                per_record[(p[0], int(p[1]), p[2], p[3])] = p[4]
             elif len(p) == 3:
-                new_gt[(p[0], int(p[1]))] = p[2]
+                per_pos_legacy.setdefault((p[0], int(p[1])), []).append(p[2])
     n_total = n_changed = 0
     with open(in_vcf_plain, encoding="utf-8") as f, \
             open(out_plain, "w", encoding="utf-8") as fo:
@@ -259,11 +269,19 @@ def rebuild_sample_vcf(in_vcf_plain, gt_tsv, out_plain, sample):
             p = line.rstrip("\n").split("\t")
             n_total += 1
             if len(p) >= 10:
-                chrom, pos = p[0], int(p[1])
                 fmt = p[8].split(":")
                 cols = p[9].split(":")
-                if fmt[0] == "GT" and (chrom, pos) in new_gt:
-                    cols[0] = new_gt[(chrom, pos)]
+                gt = None
+                if fmt[0] == "GT":
+                    k_rec = (p[0], int(p[1]), p[3], p[4])   # chrom,pos,ref,alt
+                    if k_rec in per_record:
+                        gt = per_record[k_rec]
+                    else:
+                        gts = per_pos_legacy.get((p[0], int(p[1])))
+                        if gts is not None and len(gts) == 1:
+                            gt = gts[0]     # 仅旧 3 列且该位置恰一行
+                if gt is not None:
+                    cols[0] = gt
                     p[9] = ":".join(cols)
                     n_changed += 1
             fo.write("\t".join(p) + "\n")
